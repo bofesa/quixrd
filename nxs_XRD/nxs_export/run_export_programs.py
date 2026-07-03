@@ -3,19 +3,22 @@ from XRD_funcs import sort_nxs_by_sample
 from XRD_spectra_anal import Spectrum
 # root_dir = 
 root_dir = "G:\\Limit\\Barbara\\Soleil_2026_06\\"
-RUNSTEPS = [3,4]
+RUNSTEPS = [5]
 scanNo = 1515
-scanNos = range(1, 90+1)
+scanNos = range(21, 100+1)
 
 def extract_nxs():
     # Create an instance of the S140XRD class with the specified directories and parameters
+#LOCAL
     # s = S140XRD(nxs_file_directory = 'C:\\Users\\bosa\\OneDrive - empa.ch\\WFH\\Synchrotron\\SOLEIL Jun2026\\', export_directory = './export/',
     #             flat_file_directory = 'C:\\Users\\bosa\\OneDrive - empa.ch\\WFH\\Synchrotron\\SOLEIL Jun2026\\putz\\flat\\', flat_file_numbers = [39,], 
     #              daterange = [20260609, 20260615])
-    s = S140XRD(nxs_file_directory = root_dir,
+#BABSI LIMIT
+    s = S140XRD(nxs_file_directory = "G:\\Limit\\Barbara\\Soleil_2026_06\\",
                 export_directory = 'N:\\Vol1-Th\\Abt206\\Sam Bojarski N\\Synchrotron\\export\\',
                 flat_file_directory = 'C:\\Users\\bosa\\OneDrive - empa.ch\\WFH\\Synchrotron\\SOLEIL Jun2026\\putz\\flat\\', flat_file_numbers = [39,], 
                 daterange = [20260609, 20260615])
+
     
     #1 Extract one scan with index (point) numbers
     if 1 in RUNSTEPS:
@@ -30,7 +33,17 @@ def extract_nxs():
 
     #4 Batch extract a range of scans with scantype labelling
     if 4 in RUNSTEPS:
-        s.batch_extract_S140XRD_chidelta(scanNos = scanNos, incl_q = True, showGraph = True)
+        s.batch_extract_S140XRD_chidelta(scanNos = scanNos, incl_q = True, showGraph = False, saveGraph = True)
+
+    #5 Batch extract a range of scans with scantype labelling from a sorted directory structure (sorted by sample)
+    if 5 in RUNSTEPS:
+#SORTED
+        s = S140XRD(nxs_file_directory = r"N:\Vol1-Th\Abt206\Sam Bojarski N\Synchrotron\Sorted_Data SOLEIL_2026_06",
+                    export_directory = 'N:\\Vol1-Th\\Abt206\\Sam Bojarski N\\Synchrotron\\export_sorted\\',
+                    flat_file_directory = 'C:\\Users\\bosa\\OneDrive - empa.ch\\WFH\\Synchrotron\\SOLEIL Jun2026\\putz\\flat\\', flat_file_numbers = [39,], 
+                    daterange = [20260609, 20260615])
+        s.batch_extract_S140XRD(scanNos = scanNos, incl_q = True, showGraph = False, saveGraph = True, mirror_sorted_structure = True)
+        # s.batch_extract_S140XRD_chidelta(scanNos = scanNos, incl_q = True, showGraph = False, saveGraph = True, mirror_sorted_structure = True)
 
     # for pI in range(0, 15):
     #     s.s140_visu_one_rawImage(scanNo = 1515, pointIndex = pI, logScale = True, mini = -1, maxi = -1, save_fig_path = './scan_1515_images/')

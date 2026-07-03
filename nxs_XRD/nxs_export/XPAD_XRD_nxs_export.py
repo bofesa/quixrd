@@ -1,6 +1,8 @@
 
-import h5py, numpy, tables, os, time, math
+import h5py, numpy, tables, os, time, math, re
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 from scipy import ndimage
 from scipy.optimize import curve_fit  #fitting
 from glob import glob
@@ -10,7 +12,10 @@ import datetime as dt
 import pandas as pd
 import math
 
-from XRD_funcs import *
+try:
+    from .XRD_funcs import *
+except ImportError:
+    from XRD_funcs import *
 
 plt.ion() #interactive mode on (for plotting the figures)
 
@@ -73,38 +78,132 @@ distance = calib_pixels_per_deg/numpy.tan(1.0*deg2rad); # distance xpad to sampl
 #print "sample-detector distance = %f pixels	= %f mm" %(distance, distance*0.13)
 
 
+def _scan_no_from_nxs_name(filename):
+    match = re.fullmatch(
+        rf"{re.escape(nxs_fileName_root)}(\d+){re.escape(nxs_fileName_suffix)}",
+        os.path.basename(filename),
+    )
+    return int(match.group(1)) if match else None
+
+
+def _scan_no_from_export_name(filename):
+    basename = os.path.basename(filename)
+    match = re.match(r"I_vs_2th_(\d+)_.*\.txt$", basename)
+    if match:
+        return int(match.group(1))
+    match = re.match(r"scan_(\d+)_.*\.(csv|png)$", basename)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _make_plot_figure(showGraph):
+    if showGraph:
+        return plt.subplots()
+    fig = Figure()
+    FigureCanvasAgg(fig)
+    return fig, fig.subplots()
+
+
+def _build_sorted_nxs_scan_map(sorted_nxs_directory):
+    sorted_root = os.path.abspath(sorted_nxs_directory)
+    scan_map = {}
+    for root, _, files in os.walk(sorted_root):
+        for filename in files:
+            scan_no = _scan_no_from_nxs_name(filename)
+            if scan_no is None:
+                continue
+            if scan_no in scan_map:
+                continue
+            full_path = os.path.join(root, filename)
+            rel_folder = os.path.relpath(root, sorted_root)
+            if rel_folder == ".":
+                rel_folder = ""
+            scan_map[scan_no] = (full_path, rel_folder)
+    return scan_map
+
+
+def sort_extracted_by_sample(source_export_directory, sorted_nxs_directory, output_directory=None, move=False):
+    """Copy or move already-exported XRD files into folders matching a sorted NXS tree."""
+    source_root = os.path.abspath(source_export_directory)
+    output_root = os.path.abspath(output_directory or source_export_directory)
+    scan_map = _build_sorted_nxs_scan_map(sorted_nxs_directory)
+    transferred = []
+    unmatched = []
+
+    os.makedirs(output_root, exist_ok=True)
+    for root, _, files in os.walk(source_root):
+        if output_root == source_root and os.path.abspath(root) != source_root:
+            continue
+        for filename in files:
+            scan_no = _scan_no_from_export_name(filename)
+            if scan_no is None:
+                continue
+            source_path = os.path.join(root, filename)
+            if scan_no not in scan_map:
+                unmatched.append(source_path)
+                continue
+            _, rel_folder = scan_map[scan_no]
+            target_folder = os.path.join(output_root, rel_folder)
+            os.makedirs(target_folder, exist_ok=True)
+            target_path = os.path.join(target_folder, filename)
+            if os.path.abspath(source_path) == os.path.abspath(target_path):
+                continue
+            if move:
+                shutil.move(source_path, target_path)
+                action = "moved"
+            else:
+                shutil.copy2(source_path, target_path)
+                action = "copied"
+            transferred.append({"scan": scan_no, "source": source_path, "target": target_path, "action": action})
+
+    return {
+        "source_export_directory": source_root,
+        "sorted_nxs_directory": os.path.abspath(sorted_nxs_directory),
+        "output_directory": output_root,
+        "move": bool(move),
+        "transferred": transferred,
+        "unmatched": unmatched,
+        "scan_map": {scan: rel for scan, (_, rel) in scan_map.items()},
+    }
+
+
 class S140XRD():
     def __init__(self, nxs_file_directory = './', export_directory = '',
                  flat_file_directory = './flat/', flat_file_numbers: list = [],
-                 daterange: list = [20260609, 20260615]):
+                 daterange: list = [20260609, 20260615],
+                 recursive_scan_lookup: bool = True):
         #folder of the nxs data; The NXS data are in sub-folders containing the year and the date
         if not os.path.exists(nxs_file_directory):
             if not os.path.exists(nxs_file_directory + '/'):
                 raise ValueError(f"Provided nxs_file_directory '{nxs_file_directory}' does not exist.")
             else:
-                self.nxsfile_directory = nxs_file_directory + '/'
+                self.nxsfile_directory = os.path.join(nxs_file_directory, "")
         else:
-            self.nxsfile_directory = nxs_file_directory
+            self.nxsfile_directory = os.path.join(nxs_file_directory, "")
         #subfolder where the results are saved
         if export_directory == '' or export_directory is None: 
-            self.export_directory = nxs_file_directory + 'exported/'
+            self.export_directory = os.path.join(self.nxsfile_directory, "exported", "")
         else:
-            self.export_directory = export_directory
+            self.export_directory = os.path.join(export_directory, "")
         # try:
         #     os.stat(export_directory)
         # except:
         #     os.mkdir(export_directory)
-        self.flat_file_directory = flat_file_directory
+        self.flat_file_directory = os.path.join(flat_file_directory, "")
         if len(flat_file_numbers) == 0:
             print("Warning: No flat field scan number provided. Using default value of 39.")
             flat_file_numbers = [39] #default value, if not given as input parameter
         self.flat_file_numbers = flat_file_numbers
         self.daterange = self.reformat_daterange(daterange) # date limits for which the Nxs data will be searched
         self.flatImg_inv = None # will call flatImg_inv = read_flatField() when first needed, then keep it
+        self.recursive_scan_lookup = recursive_scan_lookup
+        self._scan_file_index = None
 
         # Names for different scan types, to be used in output file names
-        self.scan_types = {'ascan_chi': 'chi', 'ascan_delta': 'delta', 'ascan_omega': 'omega', 'ascan_tzs': 'z', 
-                           'dscan_delta': 'delta', 'dscan_chi': 'chi', 'dscan_omega': 'omega', 'dscan_tzs': 'z'}
+        self.scan_types = {'ascan_chi': 'chi', 'ascan_delta': 'delta', 'ascan_omega': 'omega', 'ascan_phi': 'phi', 'ascan_tzs': 'z', 'ascan_tys': 'y', 'ascan_txs': 'x',
+                           'dscan_delta': 'delta', 'dscan_chi': 'chi', 'dscan_omega': 'omega', 'dscan_phi': 'phi', 'dscan_tzs': 'z', 'dscan_tys': 'y', 'dscan_txs': 'x',
+                           'time_scan': 'time', }
 
         self.nxsdate_subfolder = '' # identified subfolder containing the data, identified from the folder names and the date limits given as input parameters. It is set when reading the metadata, and then used for reading the XPAD data
 
@@ -117,6 +216,57 @@ class S140XRD():
         # nxs_pathFolder_Root = pathRootData #folder of the nxs data; The NXS data are in sub-folders containing the year and the date
             # maps onto self.nxsfile_directory
         # pathSaveRoot = pathRoot + "exploited/" #subfolder where the results are saved
+
+    def _scan_filename(self, scanNo):
+        return nxs_fileName_root + str(scanNo).zfill(numberOfDigits) + nxs_fileName_suffix
+
+    def _build_scan_file_index(self):
+        if self._scan_file_index is not None:
+            return self._scan_file_index
+        self._scan_file_index = _build_sorted_nxs_scan_map(self.nxsfile_directory)
+        return self._scan_file_index
+
+    def _resolve_scan_path(self, scanNo):
+        fileName = self._scan_filename(scanNo)
+        direct_path = os.path.join(self.nxsfile_directory, fileName)
+        if os.path.isfile(direct_path):
+            return direct_path, ""
+
+        if self.recursive_scan_lookup:
+            scan_index = self._build_scan_file_index()
+            if scanNo in scan_index:
+                return scan_index[scanNo]
+
+        if self.daterange:
+            for datestring in self.daterange:
+                dated_path = os.path.join(self.nxsfile_directory, str(datestring), fileName)
+                if os.path.isfile(dated_path):
+                    return dated_path, str(datestring)
+
+        return None, ""
+
+    def _export_path_for_scan(self, scanNo, mirror_sorted_structure=False):
+        export_folder = self.export_directory
+        if mirror_sorted_structure:
+            _, rel_folder = self._resolve_scan_path(scanNo)
+            if rel_folder:
+                export_folder = os.path.join(self.export_directory, rel_folder)
+        os.makedirs(export_folder, exist_ok=True)
+        return os.path.join(export_folder, "")
+
+    def _graph_path_for_scan(self, scanNo, export_folder, suffix):
+        safe_suffix = str(suffix).strip().replace(" ", "_")
+        if not safe_suffix.lower().endswith(".png"):
+            safe_suffix += ".png"
+        return os.path.join(export_folder, f"scan_{scanNo}_{safe_suffix}")
+
+    def _date_parts_from_path(self, path):
+        basename = os.path.basename(os.path.normpath(path))
+        match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", basename)
+        if not match:
+            return None
+        year, month, day = match.groups()
+        return int(year), int(month), int(day)
 
     def reformat_daterange(self, daterange):
         if daterange is None:
@@ -148,7 +298,8 @@ class S140XRD():
     #======================================================
     #optimizing the gam angle to be considered (shift) by minimizing the fwhm of the XRD peak
     #it will be done for a particular image of the ref powder (delta scan for ex)
-    def extract_S140XRD_idx(self, scanNo, incl_q = True, sort_type=False, add_metadata=True, showGraph = False):
+    def extract_S140XRD_idx(self, scanNo, incl_q = True, sort_type=False, add_metadata=True,
+                            showGraph = False, saveGraph = False, mirror_sorted_structure = False):
         """ Converts .nxs data into intensity, 2theta and q values
             One scanNo is split into all its individual scans, and saved as I_vs_2th_scanNo_pointIdx.txt files
             This is ~ the original function provided from Diffabs SOLEIL
@@ -161,12 +312,8 @@ class S140XRD():
         """
 
         #pathSave, creating the corresponding folder
-        try:
-            os.stat(self.export_directory)
-        except:
-            os.mkdir(self.export_directory)
         # pathSave = self.export_directory + "scan_%d/"%(scanNo)
-        pathSave = self.export_directory ###the extracted XRD will have 2 indexes: scanNo and pointIdx
+        pathSave = self._export_path_for_scan(scanNo, mirror_sorted_structure=mirror_sorted_structure) ###the extracted XRD will have 2 indexes: scanNo and pointIdx
 
         pointsFound, data_index_xpad, deltaArray, gamArray, phiArray, chiArray, omeArray, energyArray, TemperatureArray, mssg_metadata, mssgActuator_list, Izero, Izero_mean = self.s140_read_metadata_and_actuators(scanNo, print_Flag = True)
 
@@ -178,7 +325,7 @@ class S140XRD():
         if pointsFound is None or data_index_xpad is None:
             print("Error: Failed to find XPAD dataset in the NXS file.")
             return
-        file1 = tables.open_file(self.nxs_pathFolder+fileName)
+        file1 = tables.open_file(os.path.join(self.nxs_pathFolder, fileName))
         #fileNameRoot1 = file1.root._v_groups.keys()[0]
         #command = "file1.root.__getattr__(\""+str(fileNameRoot1)+"\")"
         command = "file1.root.scan_%s" %( str(scanNo).zfill(4)  )
@@ -188,14 +335,16 @@ class S140XRD():
         print(f"Scan type: {scan_type}")
 
         start_time = eval(command+".start_time")[()].decode("utf-8")
-        timestamps = [dt.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S.%f") for t in eval(command+".scan_data.sensors_timestamps")[:]]
+        timestamps = [dt.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S.%f") if not math.isnan(t) else ""
+                      for t in eval(command + ".scan_data.sensors_timestamps")[:]
+]
         filter = eval(command+".scan_data.data_13")[:] # Decimal value of the wanted filter combination
         filterFactor = eval(command+".scan_data.data_14")[:] # The computed attenuation of the selected filter combination
 
         if pointsFound.__len__() == 1: #1D scan
             error_flag = False
-            if showGraph:
-                fig, ax = plt.subplots()
+            if showGraph or saveGraph:
+                fig, ax = _make_plot_figure(showGraph)
                 cmap = plt.get_cmap('jet', deltaArray.shape[0])
             for pointIndex in range(0, deltaArray.shape[0]):
                 try: #need to take into account the 'empty' XPAD images (a lot of att for ex)
@@ -356,8 +505,9 @@ class S140XRD():
                         
 
                     #plotting the result
-                    if showGraph:
-                        ax.plot(TwoThResult[10:-15], intensityResult[10:-15], ".-", color=cmap(pointIndex), label=f"Point {pointIndex}") #throw away some points close to the edges
+                    if showGraph or saveGraph:
+                        ax.plot(TwoThResult[10:-15], intensityResult[10:-15], ".-", color=cmap(pointIndex), label=f"Point {pointIndex}",
+                                linewidth=0.5, markersize=2) #throw away some points close to the edges
                         ax.set_xlabel("2$\\theta$ (°)"); ax.set_ylabel("intensity (arb. units)")
                 except Exception as e:
                     print (f"    !!! XPAD image {pointIndex} could not be read properly, skipped for the XRD extraction !!!")
@@ -367,20 +517,24 @@ class S140XRD():
         print("   ... closing file")
         file1.close()
         print ("FINISHED")
-        if showGraph:
+        if showGraph or saveGraph:
             ax.legend(fontsize=8, loc='best', ncols=legend_columniser(len(ax.get_lines())))
             ax.grid(visible = True)
-            plt.title(f"Scan {scanNo} ({deltaArray.shape[0]} points)")
-            plt.xlabel("2$\\theta$ (°)")
-            plt.ylabel("Intensity (arb. units)")
-            plt.show()
+            ax.set_title(f"Scan {scanNo} ({scan_type}, {deltaArray.shape[0]} points)")
+            ax.set_xlabel("2$\\theta$ (°)")
+            ax.set_ylabel("Intensity (arb. units)")
+            if saveGraph:
+                fig.savefig(self._graph_path_for_scan(scanNo, pathSave, "I_vs_2th.png"), dpi=300)
+            if showGraph:
+                plt.show()
             return fig, ax
         else:
             return None
 
 
     #======================================================
-    def extract_S140XRD(self, scanNo, incl_q = True, showGraph = False):
+    def extract_S140XRD(self, scanNo, incl_q = True, showGraph = False,
+                        saveGraph = False, mirror_sorted_structure = False):
         """ Converts .nxs data into a single csv file with all data
             One scanNo is split into all its individual scans, and saved as I_vs_2th_scanNo_pointIdx.txt files
             args:
@@ -390,12 +544,8 @@ class S140XRD():
         """
 
         #pathSave, creating the corresponding folder
-        try:
-            os.stat(self.export_directory)
-        except:
-            os.mkdir(self.export_directory)
         # pathSave = self.export_directory + "scan_%d/"%(scanNo)
-        pathSave = self.export_directory ###the extracted XRD will have 2 indexes: scanNo and pointIdx
+        pathSave = self._export_path_for_scan(scanNo, mirror_sorted_structure=mirror_sorted_structure) ###the extracted XRD will have 2 indexes: scanNo and pointIdx
 
         pointsFound, data_index_xpad, deltaArray, gamArray, phiArray, chiArray, omeArray, energyArray, TemperatureArray, mssg_metadata, mssgActuator_list, Izero, Izero_mean = self.s140_read_metadata_and_actuators(scanNo, print_Flag = True)
 
@@ -407,7 +557,7 @@ class S140XRD():
         if pointsFound is None or data_index_xpad is None:
             print("Error: Failed to find XPAD dataset in the NXS file.")
             return
-        file1 = tables.open_file(self.nxs_pathFolder+fileName)
+        file1 = tables.open_file(os.path.join(self.nxs_pathFolder, fileName))
         command = "file1.root.scan_%s" %( str(scanNo).zfill(4)  )
         print('command=',command)
 
@@ -432,8 +582,8 @@ class S140XRD():
             })
             drows = []  # list to store the rows of the dataframe
 
-            if showGraph:
-                fig, ax = plt.subplots()
+            if showGraph or saveGraph:
+                fig, ax = _make_plot_figure(showGraph)
                 cmap = plt.get_cmap('jet', deltaArray.shape[0])
             for pointIndex in range(0, deltaArray.shape[0]):
                 try: #need to take into account the 'empty' XPAD images (a lot of att for ex)
@@ -588,8 +738,9 @@ class S140XRD():
                             })
                         
                     #plotting the result
-                    if showGraph:
-                        ax.plot(twotheta, intensity, ".-", color=cmap(pointIndex), label=f"Point {pointIndex}") #throw away some points close to the edges
+                    if showGraph or saveGraph:
+                        ax.plot(twotheta, intensity, ".-", color=cmap(pointIndex), label=f"Point {pointIndex}",
+                                linewidth=0.5, markersize=2) #throw away some points close to the edges
                         ax.set_xlabel("2theta (°)"); ax.set_ylabel("intensity (arb. units)")
                 except Exception as e:
                     print (f"   !!! XPAD image {pointIndex} could not be read properly, skipped for the XRD extraction !!!")
@@ -604,14 +755,18 @@ class S140XRD():
         print("   ... closing file")
         file1.close()
         print ("FINISHED")
-        if showGraph:
+        if showGraph or saveGraph:
             ax.legend(fontsize=8, loc='best', ncols=legend_columniser(len(ax.get_lines())))
             ax.grid(visible = True)
-            plt.title(f"Scan {scanNo} ({deltaArray.shape[0]} points)")
-            plt.xlabel(r"2$\theta$ (°)")
-            plt.ylabel("Intensity (arb. units)")
-            plt.show()
-            return fig, ax
+            ax.set_title(f"Scan {scanNo}")
+            ax.set_xlabel(r"2$\theta$ (°)")
+            ax.set_ylabel("Intensity (arb. units)")
+            if saveGraph:
+                fig.savefig(os.path.splitext(savename)[0] + ".png", dpi=300)
+            if showGraph:
+                plt.show()
+                return fig, ax
+            return None
         else:
             return None
 
@@ -630,13 +785,17 @@ class S140XRD():
 
         
         datefound_flag = False
+        resolved_scan_path, resolved_rel_folder = self._resolve_scan_path(scanNo)
         # First check if the nxsfile_directory is already the correct subfolder
         nxsfile_directory_isdate = False
         try:
-            nxs_pathFolder = self.nxsfile_directory
+            if resolved_scan_path:
+                nxs_pathFolder = os.path.join(os.path.dirname(resolved_scan_path), "")
+            else:
+                nxs_pathFolder = self.nxsfile_directory
             #try reading images in the .nxs file
             print(fileName)
-            file1 = tables.open_file(nxs_pathFolder+fileName)
+            file1 = tables.open_file(os.path.join(nxs_pathFolder, fileName))
             #fileNameRoot1 = file1.root._v_groups.keys()[0]
             #command = "file1.root.__getattr__(\""+str(fileNameRoot1)+"\")"
             command = "file1.root.scan_%s"%(str(scanNo).zfill(4) )
@@ -653,10 +812,15 @@ class S140XRD():
                     pass
             file1.close()
             nxsfile_directory_isdate = True
-            this_day = int(self.nxsfile_directory[-3:-1]); this_month = int(self.nxsfile_directory[-6:-4]); this_year=int(self.nxsfile_directory[-11:-7]) # dated subfolder containin the nxs data
+            date_parts = self._date_parts_from_path(nxs_pathFolder)
+            if date_parts:
+                this_year, this_month, this_day = date_parts
+                nxsdate_subfolder = "%s-%s-%s/"%(str(this_year), str(this_month).zfill(2), str(this_day).zfill(2))
+            else:
+                this_year = this_month = this_day = 0
+                nxsdate_subfolder = resolved_rel_folder
             self.this_timestamp = [int(this_year), int(this_month), int(this_day)]
             datefound_flag = True
-            nxsdate_subfolder = '' # the nxsfile_directory is already the correct subfolder
 
         except:
             pass
@@ -666,10 +830,10 @@ class S140XRD():
             print("Searching for the dated NXS subfolder containing the data for scan %d..."%(scanNo))
             for datestring in self.daterange:
                 try:
-                    nxs_pathFolder = self.nxsfile_directory + "%s/"%(str(datestring))
+                    nxs_pathFolder = os.path.join(self.nxsfile_directory, str(datestring), "")
                     #try reading images in the .nxs file
                     print('checking for file %s'%(nxs_pathFolder+fileName))
-                    file1 = tables.open_file(nxs_pathFolder+fileName)
+                    file1 = tables.open_file(os.path.join(nxs_pathFolder, fileName))
                     #fileNameRoot1 = file1.root._v_groups.keys()[0]
                     #command = "file1.root.__getattr__(\""+str(fileNameRoot1)+"\")"
                     command = "file1.root.scan_%s"%(str(scanNo).zfill(4) )
@@ -696,7 +860,13 @@ class S140XRD():
                     print("%s" % e)
                     pass
         
-        nxsdate_subfolder = "%s-%s-%s/"%(str(this_year), str(this_month).zfill(2), str(this_day).zfill(2))
+        if datefound_flag and this_year > 0:
+            nxsdate_subfolder = "%s-%s-%s/"%(str(this_year), str(this_month).zfill(2), str(this_day).zfill(2))
+        elif datefound_flag:
+            nxsdate_subfolder = resolved_rel_folder or ''
+        else:
+            nxsdate_subfolder = "%s-%s-%s/"%(str(this_year), str(this_month).zfill(2), str(this_day).zfill(2))
+
         if nxsdate_subfolder == '-1--1--1/':
             print("Error: Failed to find valid NXS subfolder for the given date range.")
             return None, None, None, None, None, None, None, None, None, None, None, None, None
@@ -705,8 +875,10 @@ class S140XRD():
     
         self.nxsdate_subfolder = nxsdate_subfolder
         # day = this_day ; month = this_month #identified the folder containing the data
-        if not nxsfile_directory_isdate:
-            self.nxs_pathFolder = self.nxsfile_directory + self.nxsdate_subfolder
+        if resolved_scan_path:
+            self.nxs_pathFolder = os.path.join(os.path.dirname(resolved_scan_path), "")
+        elif not nxsfile_directory_isdate:
+            self.nxs_pathFolder = os.path.join(self.nxsfile_directory, self.nxsdate_subfolder)
         else:
             self.nxs_pathFolder = self.nxsfile_directory
         print('NXS path folder found: %s'%(self.nxs_pathFolder))
@@ -716,7 +888,7 @@ class S140XRD():
         print(fileName)
         try:
             #some extra information for this image (metadata)
-            with h5py.File(self.nxs_pathFolder + fileName,'r') as f: #will properly close it once the indented code is executed
+            with h5py.File(os.path.join(self.nxs_pathFolder, fileName),'r') as f: #will properly close it once the indented code is executed
 
                 """
                 group1 = f.get(f.keys()[0])
@@ -789,7 +961,7 @@ class S140XRD():
             energyArray = energy; TemperatureArray= Temperature
 
             #reading images in the .nxs file (using tables module)
-            file1 = tables.open_file(self.nxs_pathFolder+fileName)
+            file1 = tables.open_file(os.path.join(self.nxs_pathFolder, fileName))
             #fileNameRoot1 = file1.root._v_groups.keys()[0]
             #command = "file1.root.__getattr__(\""+str(fileNameRoot1)+"\")"
             command = "file1.root.scan_%s" %( str(scanNo).zfill(4)  )
@@ -1112,7 +1284,8 @@ class S140XRD():
 
     #======================================================
     # wrapper function for batch extraction of multiple scans
-    def batch_extract_S140XRD(self, scanNos, incl_q = True, showGraph = False):
+    def batch_extract_S140XRD(self, scanNos, incl_q = True, showGraph = False,
+                              saveGraph = False, mirror_sorted_structure = False):
         """ Converts .nxs data into a single csv file with all data
             One scanNo is split into all its individual scans, and saved as I_vs_2th_scanNo_pointIdx.txt files
             args:
@@ -1122,7 +1295,13 @@ class S140XRD():
         """
         outs = []
         for scanNo in scanNos:
-            out = self.extract_S140XRD(scanNo, incl_q = incl_q, showGraph = showGraph)
+            out = self.extract_S140XRD(
+                scanNo,
+                incl_q = incl_q,
+                showGraph = showGraph,
+                saveGraph = saveGraph,
+                mirror_sorted_structure = mirror_sorted_structure,
+            )
             outs.append(out)
         if showGraph:
             self.batch_plotter(outs, scanNos)
@@ -1130,7 +1309,9 @@ class S140XRD():
     
     #======================================================
     # wrapper function for batch extraction of multiple scans
-    def batch_extract_S140XRD_idx(self, scanNos: list, incl_q = True, sort_type = False, showGraph = False):
+    def batch_extract_S140XRD_idx(self, scanNos: list, incl_q = True, sort_type = False,
+                                  showGraph = False, saveGraph = False,
+                                  mirror_sorted_structure = False):
         """ Converts .nxs data into intensity, 2theta and q values, and labels as chi or delta scan
             One scanNo is split into all its individual scans, and saved as I_vs_2th_scanNo_pointIdx.txt files
             args:
@@ -1140,7 +1321,14 @@ class S140XRD():
         """
         outs = []
         for scanNo in scanNos:
-            out = self.extract_S140XRD_idx(scanNo, incl_q = incl_q, sort_type = sort_type, showGraph = showGraph)
+            out = self.extract_S140XRD_idx(
+                scanNo,
+                incl_q = incl_q,
+                sort_type = sort_type,
+                showGraph = showGraph,
+                saveGraph = saveGraph,
+                mirror_sorted_structure = mirror_sorted_structure,
+            )
             outs.append(out)
         if showGraph:
             self.batch_plotter(outs, scanNos)
@@ -1149,7 +1337,8 @@ class S140XRD():
 
     #======================================================
     # wrapper function for the general extraction, with chi/delta sorting hardcoded
-    def extract_S140XRD_chidelta(self, scanNo: int, incl_q = True, showGraph = False):
+    def extract_S140XRD_chidelta(self, scanNo: int, incl_q = True, showGraph = False,
+                                 saveGraph = False, mirror_sorted_structure = False):
         """ Converts .nxs data into intensity, 2theta and q values, and labels as chi or delta scan
             One scanNo is split into all its individual scans, and saved as I_vs_2th_scanNo_pointIdx.txt files
             args:
@@ -1158,13 +1347,21 @@ class S140XRD():
                 sort_type: whether to sort the data by chi/delta (True) or not (False)
                 showGraph: whether to display the data in a graph
         """
-        out = self.extract_S140XRD_idx(scanNo, sort_type = True, incl_q = incl_q, showGraph = showGraph)
+        out = self.extract_S140XRD_idx(
+            scanNo,
+            sort_type = True,
+            incl_q = incl_q,
+            showGraph = showGraph,
+            saveGraph = saveGraph,
+            mirror_sorted_structure = mirror_sorted_structure,
+        )
         return out
     
 
     #======================================================
     # wrapper function for batch extraction of multiple scans, with chi/delta sorting hardcoded
-    def batch_extract_S140XRD_chidelta(self, scanNos: list, incl_q = True, showGraph = False):
+    def batch_extract_S140XRD_chidelta(self, scanNos: list, incl_q = True, showGraph = False,
+                                       saveGraph = False, mirror_sorted_structure = False):
         """ Converts .nxs data into intensity, 2theta and q values, and labels as chi or delta scan
             One scanNo is split into all its individual scans, and saved as I_vs_2th_scanNo_pointIdx.txt files
             args:
@@ -1174,7 +1371,13 @@ class S140XRD():
         """
         outs = []
         for scanNo in scanNos:
-            out = self.extract_S140XRD_chidelta(scanNo, incl_q = incl_q, showGraph = showGraph)
+            out = self.extract_S140XRD_chidelta(
+                scanNo,
+                incl_q = incl_q,
+                showGraph = showGraph,
+                saveGraph = saveGraph,
+                mirror_sorted_structure = mirror_sorted_structure,
+            )
             outs.append(out)
         if showGraph:
             self.batch_plotter(outs, scanNos)
