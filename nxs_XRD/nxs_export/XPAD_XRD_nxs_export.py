@@ -19,6 +19,8 @@ except ImportError:
 
 plt.ion() #interactive mode on (for plotting the figures)
 
+DIAGNOSTIC = False # if True, print out lots of information about processing scans
+
 # year = 2026; month1 = 6; month2 = 6; day1 = 9; day2 = 15 #date limits for which the Nxs data will be searched
 
 ### --- Fixed metadata --- ###
@@ -329,7 +331,8 @@ class S140XRD():
         #fileNameRoot1 = file1.root._v_groups.keys()[0]
         #command = "file1.root.__getattr__(\""+str(fileNameRoot1)+"\")"
         command = "file1.root.scan_%s" %( str(scanNo).zfill(4)  )
-        print('command=',command)
+        if DIAGNOSTIC:
+            print('command=',command)
 
         scan_type = eval(command+".scan_config.name")[()].decode("utf-8")
         print(f"Scan type: {scan_type}")
@@ -350,7 +353,8 @@ class S140XRD():
                 try: #need to take into account the 'empty' XPAD images (a lot of att for ex)
                     mssg2write = "*** pointIdx = %d "%(pointIndex)
                     # mssg2write += "delta = %.3f, gam = %.3f, E = %.3f"%(deltaArray[pointIndex], gamArray[pointIndex], energyArray[pointIndex])
-                    print (mssg2write)
+                    if DIAGNOSTIC:
+                        print (mssg2write)
 
                     xpadImage = eval(command+".scan_data.data_"+str(data_index_xpad).zfill(2)+"[pointIndex]")
 
@@ -358,7 +362,8 @@ class S140XRD():
                         thisImage = 0.0+xpadImage / (0.+Izero[pointIndex])*Izero_mean
                     else:
                         thisImage = 0.0+xpadImage
-                    print ("xpad_size", xpadImage.shape)
+                    if DIAGNOSTIC:
+                        print ("xpad_size", xpadImage.shape)
 
                     delta = deltaArray[pointIndex];
                     gam = gamArray[pointIndex];
@@ -459,8 +464,9 @@ class S140XRD():
                         TwoThResult[ii] = 0.5*(TwoTh_temp1+TwoTh_temp2);
                     thisBinArray = numpy.floor((twoThArray*maskPsi - miniTwoTh)/stepTwoTh);
                     thisBinArray = thisBinArray.astype('int')
-                    print ("		  (2th_mini=%.2f   2th_maxi=%.2f)" %(twoThArray.min(), twoThArray.max()) 		)
-                    print ("		  (psi_mini=%.2f   psi_maxi=%.2f)" %(psiArray.min(), psiArray.max()) 		)
+                    if DIAGNOSTIC:
+                        print ("		  (2th_mini=%.2f   2th_maxi=%.2f)" %(twoThArray.min(), twoThArray.max()) 		)
+                        print ("		  (psi_mini=%.2f   psi_maxi=%.2f)" %(psiArray.min(), psiArray.max()) 		)
 
                     intensityResult = numpy.zeros(nbOfBins+1); #this will be the summed intensity
                     IntensityArray = IntensityArray * maskPsi
@@ -523,6 +529,7 @@ class S140XRD():
             ax.set_title(f"Scan {scanNo} ({scan_type}, {deltaArray.shape[0]} points)")
             ax.set_xlabel("2$\\theta$ (°)")
             ax.set_ylabel("Intensity (arb. units)")
+            ax.set_ylim(bottom=0)
             if saveGraph:
                 fig.savefig(self._graph_path_for_scan(scanNo, pathSave, "I_vs_2th.png"), dpi=300)
             if showGraph:
@@ -559,7 +566,8 @@ class S140XRD():
             return
         file1 = tables.open_file(os.path.join(self.nxs_pathFolder, fileName))
         command = "file1.root.scan_%s" %( str(scanNo).zfill(4)  )
-        print('command=',command)
+        if DIAGNOSTIC:
+            print('command=',command)
 
         scan_type = eval(command+".scan_config.name")[()].decode("utf-8")
         print(f"Scan type: {scan_type}")
@@ -589,7 +597,8 @@ class S140XRD():
                 try: #need to take into account the 'empty' XPAD images (a lot of att for ex)
                     mssg2write = "*** pointIdx = %d "%(pointIndex)
                     mssg2write += "delta = %.3f, gam = %.3f, E = %.3f"%(deltaArray[pointIndex], gamArray[pointIndex], energyArray[pointIndex])
-                    print (mssg2write)
+                    if DIAGNOSTIC:
+                        print (mssg2write)
 
                     metadata = metadf.iloc[pointIndex].to_dict() # extract the metadata for this point as a dictionary, to be added to each line of the output csv file
 
@@ -599,7 +608,8 @@ class S140XRD():
                         thisImage = 0.0+xpadImage / (0.+Izero[pointIndex])*Izero_mean
                     else:
                         thisImage = 0.0+xpadImage
-                    print ("xpad_size", xpadImage.shape)
+                    if DIAGNOSTIC:
+                        print ("xpad_size", xpadImage.shape)
 
                     delta = deltaArray[pointIndex];
                     gam = gamArray[pointIndex];
@@ -700,8 +710,9 @@ class S140XRD():
                         TwoThResult[ii] = 0.5*(TwoTh_temp1+TwoTh_temp2);
                     thisBinArray = numpy.floor((twoThArray*maskPsi - miniTwoTh)/stepTwoTh);
                     thisBinArray = thisBinArray.astype('int')
-                    print ("		  (2th_mini=%.2f   2th_maxi=%.2f)" %(twoThArray.min(), twoThArray.max()) 		)
-                    print ("		  (psi_mini=%.2f   psi_maxi=%.2f)" %(psiArray.min(), psiArray.max()) 		)
+                    if DIAGNOSTIC:
+                        print ("		  (2th_mini=%.2f   2th_maxi=%.2f)" %(twoThArray.min(), twoThArray.max()) 		)
+                        print ("		  (psi_mini=%.2f   psi_maxi=%.2f)" %(psiArray.min(), psiArray.max()) 		)
 
                     intensityResult = numpy.zeros(nbOfBins+1); #this will be the summed intensity
                     IntensityArray = IntensityArray * maskPsi
@@ -761,6 +772,7 @@ class S140XRD():
             ax.set_title(f"Scan {scanNo}")
             ax.set_xlabel(r"2$\theta$ (°)")
             ax.set_ylabel("Intensity (arb. units)")
+            ax.set_ylim(bottom=0)
             if saveGraph:
                 fig.savefig(os.path.splitext(savename)[0] + ".png", dpi=300)
             if showGraph:
@@ -827,12 +839,14 @@ class S140XRD():
 
         if not datefound_flag:
             #detecting th folder name (yyy-mm-dd) containing the .nxs data. The xpad images are detected from their size (240 x 560)
-            print("Searching for the dated NXS subfolder containing the data for scan %d..."%(scanNo))
+            if DIAGNOSTIC:
+                print("Searching for the dated NXS subfolder containing the data for scan %d..."%(scanNo))
             for datestring in self.daterange:
                 try:
                     nxs_pathFolder = os.path.join(self.nxsfile_directory, str(datestring), "")
                     #try reading images in the .nxs file
-                    print('checking for file %s'%(nxs_pathFolder+fileName))
+                    if DIAGNOSTIC:
+                        print('checking for file %s'%(nxs_pathFolder+fileName))
                     file1 = tables.open_file(os.path.join(nxs_pathFolder, fileName))
                     #fileNameRoot1 = file1.root._v_groups.keys()[0]
                     #command = "file1.root.__getattr__(\""+str(fileNameRoot1)+"\")"
@@ -848,7 +862,8 @@ class S140XRD():
                                 data_index_xpad = datasetIndex
                                 this_day = int(datestring[8:10]); this_month = int(datestring[5:7]); this_year=int(datestring[0:4]) # dated subfolder containin the nxs data
                                 self.this_timestamp = [int(this_year), int(this_month), int(this_day)]
-                                print("NXS subfolder found at %s"%(nxs_pathFolder+fileName))
+                                if DIAGNOSTIC:
+                                    print("NXS subfolder found at %s"%(nxs_pathFolder+fileName))
                                 datefound_flag = True
                                 break
                         except:
@@ -881,11 +896,13 @@ class S140XRD():
             self.nxs_pathFolder = os.path.join(self.nxsfile_directory, self.nxsdate_subfolder)
         else:
             self.nxs_pathFolder = self.nxsfile_directory
-        print('NXS path folder found: %s'%(self.nxs_pathFolder))
+        if DIAGNOSTIC:
+            print('NXS path folder found: %s'%(self.nxs_pathFolder))
         delta = numpy.nan; gam = numpy.nan; chi = numpy.nan; phi = numpy.nan; omega = numpy.nan
         energy = numpy.nan
-        print(self.nxs_pathFolder)
-        print(fileName)
+        if DIAGNOSTIC:
+            print(self.nxs_pathFolder)
+            print(fileName)
         try:
             #some extra information for this image (metadata)
             with h5py.File(os.path.join(self.nxs_pathFolder, fileName),'r') as f: #will properly close it once the indented code is executed
@@ -918,7 +935,8 @@ class S140XRD():
                     pass
                 """
                 list_elements = [key for key in list(f["/"].keys())]
-                print(list_elements)
+                if DIAGNOSTIC:
+                    print(list_elements)
                 try:
                     delta = numpy.array(f["/"+list_elements[0]+'/DIFFABS/d13-1-cx1__ex__dif.1-delta/raw_value'])
                 except:
@@ -949,11 +967,14 @@ class S140XRD():
                     pass
                 try:
                     energy = numpy.array(f["/"+list_elements[0]+'/DIFFABS/d13-1-c03__op__mono/energy']) ###read metadata Energy
-                    print("ENERGY read (keV) = %f"%(energy))
+                    if DIAGNOSTIC:
+                        print("ENERGY read (keV) = %f"%(energy))
                 except:
                     pass
                 try:
                     Temperature = numpy.array(f["/"+list_elements[0]+'/scan_data/data_15']) ###read metadata Temperature
+                    if DIAGNOSTIC:
+                        print("Temperature read (°C) = %f"%(Temperature))
                 except:
                     pass
 
@@ -979,7 +1000,8 @@ class S140XRD():
                         #modif to deal with Meshes
                         #pointsFound = tmp_data_shape[:-2][0]
                         pointsFound = tmp_data_shape[:-2]
-                        print("dataset",datasetIndex)
+                        if DIAGNOSTIC:
+                            print("dataset",datasetIndex)
 
                         data_index_xpad = datasetIndex
                 except:
@@ -1003,15 +1025,18 @@ class S140XRD():
             for actuatorIndex in range (1, 2):
                 mssg2add = ""
                 try:
-                    print (actuatorIndex, "aaaaa", command)
-                    print(command+".scan_data.actuator_1_"+str(actuatorIndex)+".attrs.long_name")
+                    if DIAGNOSTIC:
+                        print (actuatorIndex, "aaaaa", command)
+                        print(command+".scan_data.actuator_1_"+str(actuatorIndex)+".attrs.long_name")
                     tmp_ = eval(command+".scan_data.actuator_1_"+str(actuatorIndex)+".attrs.long_name")
-                    print ("aaa", tmp_)
+                    if DIAGNOSTIC:
+                        print ("aaa", tmp_)
                     try:
                         if tmp_ == b"d13-1-cx1/ex/dif.1-delta/position":
                             deltaArray = eval(command+".scan_data.actuator_1_"+str(actuatorIndex)+".read()")
                             mssg2add = "   1_%d, %s\n"%(actuatorIndex, tmp_)
-                            print (deltaArray)
+                            if DIAGNOSTIC:
+                                print (deltaArray)
                     except:
                         pass
                     try:
@@ -1118,7 +1143,8 @@ class S140XRD():
         ### will make sure that the delta and gam arrays have the same dimmensions (for meshes)
         shape_delta = deltaArray.shape.__len__()
         shape_gam = gamArray.shape.__len__()
-        print ("shape_delta = ", shape_delta, "shape_gam = ", shape_gam)
+        if DIAGNOSTIC:
+            print ("shape_delta = ", shape_delta, "shape_gam = ", shape_gam)
         if shape_delta  == 2 and shape_gam == 1: #need to generate gam Array as 2D
             new_gamArray = numpy.zeros(deltaArray.shape)
             for uu in range (gamArray.shape[0]):

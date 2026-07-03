@@ -5,7 +5,7 @@ from XRD_spectra_anal import Spectrum
 root_dir = "G:\\Limit\\Barbara\\Soleil_2026_06\\"
 RUNSTEPS = [5]
 scanNo = 1515
-scanNos = range(21, 100+1)
+scanNos = range(1001, 2803+1)
 
 def extract_nxs():
     # Create an instance of the S140XRD class with the specified directories and parameters
@@ -20,14 +20,15 @@ def extract_nxs():
                 daterange = [20260609, 20260615])
 
     
-    #1 Extract one scan with index (point) numbers
+    #1 Extract one scan to single csv file
     if 1 in RUNSTEPS:
         s.extract_S140XRD_idx(scanNo=scanNo, incl_q = True)
 
     #2 Extract one scan with scantype labelling
     if 2 in RUNSTEPS:
         s.extract_S140XRD_chidelta(scanNo=scanNo, incl_q = True)
-    #3 Batch extract a range of scans with index (point) numbers
+
+    #3 Batch extract a range of scans to single csv file
     if 3 in RUNSTEPS:
         s.batch_extract_S140XRD(scanNos = scanNos, incl_q = True, showGraph = False)
 
@@ -42,8 +43,10 @@ def extract_nxs():
                     export_directory = 'N:\\Vol1-Th\\Abt206\\Sam Bojarski N\\Synchrotron\\export_sorted\\',
                     flat_file_directory = 'C:\\Users\\bosa\\OneDrive - empa.ch\\WFH\\Synchrotron\\SOLEIL Jun2026\\putz\\flat\\', flat_file_numbers = [39,], 
                     daterange = [20260609, 20260615])
+    # export to csv
         s.batch_extract_S140XRD(scanNos = scanNos, incl_q = True, showGraph = False, saveGraph = True, mirror_sorted_structure = True)
-        # s.batch_extract_S140XRD_chidelta(scanNos = scanNos, incl_q = True, showGraph = False, saveGraph = True, mirror_sorted_structure = True)
+    # export each frame to txt with scantype labelling
+        s.batch_extract_S140XRD_chidelta(scanNos = scanNos, incl_q = True, showGraph = False, saveGraph = False, mirror_sorted_structure = True)
 
     # for pI in range(0, 15):
     #     s.s140_visu_one_rawImage(scanNo = 1515, pointIndex = pI, logScale = True, mini = -1, maxi = -1, save_fig_path = './scan_1515_images/')
@@ -53,11 +56,11 @@ def extract_nxs():
 #   ADD ABILITY TO IMPORT DATA FROM SORTED DIRECTORIES, MIRRORING THE STRUCTURE OF THE SORTED DIRECTORIES
 
 
-def sort_nxs():
+def plot_nxs(scans):
     spec = Spectrum(directory = './export/')
-    spec.plot_Ivs2theta(scanNos = range(440, 450+1), plot_only = ['chi'], offset = 0.4, normalise = None, single_chi = False)
+    spec.plot_Ivs2theta(scanNos = scans, plot_only = ['chi'], offset = 0.4, normalise = None, single_chi = False)
 
-
+def sort_nxs():
     sort_nxs_by_sample(nxs_directory = r'C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\SOLEIL Jun2026',
                        sample_file = r'C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\SOLEIL Jun26 Samples.xlsx',
                        output_directory = 'C:\\Users\\bosa\\OneDrive - empa.ch\\WFH\\Synchrotron\\SOLEIL Jun2026 sorted_nxs',
