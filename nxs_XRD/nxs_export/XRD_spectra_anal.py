@@ -12,7 +12,7 @@ class Spectrum():
         self.file_directory = directory
 
 
-    def plot_Ivs2theta(self, scanNos: int | list[int], plot_only: str | list[str] = None, offset: float = 0.0, normalise: str=None, single_chi: bool=False):
+    def plot_Ivs2theta(self, scanNos: int | list[int], plot_only: str | list[str] = None, offset: float = 0.0, normalise: str=None, single_chi: bool=False, label: str | list = []):
         """
         Plots the spectra for the specified scan numbers.
         args:
@@ -22,9 +22,13 @@ class Spectrum():
                 This is a multiplier applied to the minimum intensity value of the first scan in the list. For example, an offset of 0.1 will add 10% of the minimum intensity value to all subsequent scans.
             normalise (str): method to normalise the intensity values ('zero' to normalise on the lowest-angle point, 'min' to normalise on the minimum intensity value, 'max' to normalise on the maximum intensity value)
             single_chi (bool): whether to plot only the first 'chi' scan for each scan number
+            label (str): whether to add information to scan label. None for no additional information; 'type' for scan type; 'temp' for temperature, 'time' for time
         """
         if isinstance(scanNos, int):
             scanNos = [scanNos]
+
+        if isinstance(label, str):
+            label = [label]
 
         scan_types = ['chi', 'delta', 'z', 'omega']
         if plot_only is None:
@@ -82,6 +86,7 @@ class Spectrum():
                     print(f"Scan type '{scan_type}' for scan {scanNo} is not in the list of types to plot. Skipping this scan.")
                     continue
 
+                print(f"Processing scan {scanNo} of type '{scan_type}' with {len(fnames)} files.")
                 for fname in fnames:
                     # Load the data from the files
                     idx = int(os.path.basename(fname).replace(froot, '').replace('.txt', '').split('_')[-1])
@@ -129,7 +134,33 @@ class Spectrum():
                     # Plot the data
                     if idx == min(idxs):  # Only label the first scan of each type for clarity
                         offset_value += offset * min(np.min(arr) for arr in intensities)  # Update the offset value for subsequent scans
-                        ax.plot(two_theta, intensity + offset_value, '.-', label=f"Scan {scanNo} ({scan_type})", color=cmap(norm(jdx)))
+                        label_str = ''
+                        if 'type' in label:
+                            label_str += f" {scan_type}"
+                        if 'temp' in label:
+                            # Data are in the preamble of the file as "# Temperature: 25"
+                            try:
+                                with open(fname, 'r') as f:
+                                    for line in f:
+                                        if line.startswith("# Temperature:"):
+                                            temp = line.split(":")[1].strip()
+                                            label_str += f" {temp}°C"
+                                            break
+                            except Exception as e:
+                                print(f"Could not read temperature from file {fname}: {e}")
+                        if 'time' in label:
+                            # Data are in the preamble of the file as "# Start Time: 2026-06-14T09:03:45"
+                            try:
+                                with open(fname, 'r') as f:
+                                    for line in f:
+                                        if line.startswith("# Start Time:"):
+                                            time = line.replace("# Start Time:", "").strip()
+                                            label_str += f" {time}"
+                                            break
+                            except Exception as e:
+                                print(f"Could not read time from file {fname}: {e}")
+
+                        ax.plot(two_theta, intensity + offset_value, '.-', label=f"Scan {scanNo} ({label_str.strip()})", color=cmap(norm(jdx)))
                     else:
                         if single_chi and scan_type == 'chi':
                             continue  # Skip plotting additional chi scans if single_chi is True

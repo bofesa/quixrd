@@ -5,7 +5,7 @@ from XRD_spectra_anal import Spectrum
 root_dir = "G:\\Limit\\Barbara\\Soleil_2026_06\\"
 RUNSTEPS = [5]
 scanNo = 1515
-scanNos = range(1001, 2803+1)
+scanNos = [1559, 1570, 1304]
 
 def extract_nxs():
     # Create an instance of the S140XRD class with the specified directories and parameters
@@ -56,9 +56,11 @@ def extract_nxs():
 #   ADD ABILITY TO IMPORT DATA FROM SORTED DIRECTORIES, MIRRORING THE STRUCTURE OF THE SORTED DIRECTORIES
 
 
-def plot_nxs(scans):
-    spec = Spectrum(directory = './export/')
-    spec.plot_Ivs2theta(scanNos = scans, plot_only = ['chi'], offset = 0.4, normalise = None, single_chi = False)
+def plot_nxs(scans, scan_types = ['chi', 'delta', 'z', 'omega']):
+    dir = "C:\\Users\\bosa\\local_code\\33_130113 HEN\\"
+    spec = Spectrum(directory = dir)
+    spec.plot_Ivs2theta(scanNos = scans, plot_only = scan_types, offset = 0.0, normalise = None, single_chi = False, label = ['temp'])
+
 
 def sort_nxs():
     sort_nxs_by_sample(nxs_directory = r'C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\SOLEIL Jun2026',
@@ -73,7 +75,11 @@ def sort_nxs():
 
 
 if __name__ == "__main__":
-    extract_nxs()
+    # extract_nxs()
+    delta_range = [x for x in np.arange(2150, 2200, 4)]+[x for x in np.arange(2200, 2300, 9) if x not in [2218]]+[x for x in np.arange(2300, 2330, 4)]+[x for x in np.arange(2330, 2560, 15)]
+    chi_range = [x for x in np.arange(2200, 2560, 5) if x not in [2218]]
+    srange = np.arange(2157, 2200, 1)
+    plot_nxs(scans = 2500, scan_types = ['chi'])
 
 
     input("Press Enter to exit...")

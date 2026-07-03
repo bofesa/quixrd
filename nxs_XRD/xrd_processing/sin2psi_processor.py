@@ -176,6 +176,7 @@ def fit_peak(
     plot=True,
     correction_order=1,
     plot_path: Optional[str] = None,
+    chi=None,
 ):
     tth_arr = np.asarray(tth, dtype=float)
     intensity_arr = np.asarray(intensity, dtype=float)
@@ -242,7 +243,8 @@ def fit_peak(
         if plot_path:
             scan_no = plot_path.split("\\")[-3]
             frame_no = plot_path.split("\\")[-1].replace("_fit.png", "")
-            title = f"{scan_no} {frame_no}\ncenter={two_theta[0]:.4f}, fwhm={fwhm[0]:.4f}, nu={nu[0]:.4f}"
+            psi_text = f" psi={90.0 - float(chi):.3f}" if chi is not None and pd.notna(chi) else ""
+            title = f"{scan_no} {frame_no}{psi_text}\ncenter={two_theta[0]:.4f}, fwhm={fwhm[0]:.4f}, nu={nu[0]:.4f}"
         else:
             title = f"center={two_theta[0]:.4f}, fwhm={fwhm[0]:.4f}, nu={nu[0]:.4f}"
         ax.set_title(title)
@@ -464,6 +466,7 @@ def fit_frame(tth, intensity, plot=False, **fit_kwargs):
 
     correction_order = int(fit_kwargs.get("correction_order", 1))
     plot_path = fit_kwargs.get("plot_path")
+    chi = fit_kwargs.get("chi")
 
     try:
         two_theta, max_intensity, nu, fwhm, mean_bg, median_bg, m, n, c = fit_peak(
@@ -476,6 +479,7 @@ def fit_frame(tth, intensity, plot=False, **fit_kwargs):
             plot=plot,
             correction_order=correction_order,
             plot_path=plot_path,
+            chi=chi,
         )
     except Exception:
         if explicit_windows or seed_center is None or not fallback_to_auto:
@@ -492,6 +496,7 @@ def fit_frame(tth, intensity, plot=False, **fit_kwargs):
             plot=plot,
             correction_order=correction_order,
             plot_path=plot_path,
+            chi=chi,
         )
 
     peak_mask = np.where((tth_arr > windows["peak_lower"]) & (tth_arr < windows["peak_upper"]))[0]
@@ -658,8 +663,6 @@ def process_scan(
     data_dir_path = Path(data_dir)
     scan_dir = data_dir_path / "sin2psi_export" / f"scan_{scan_number}"
     _ensure_clean_scan_dir(scan_dir, backup=backup if force else False)
-    frames_dir = scan_dir / "frames"
-    frames_dir.mkdir(parents=True, exist_ok=True)
 
     for stale in scan_dir.glob("sin2psi_plot.png"):
         stale.unlink(missing_ok=True)
@@ -667,8 +670,16 @@ def process_scan(
         stale.unlink(missing_ok=True)
     for stale in scan_dir.glob(f"scan_{scan_number}_fits.csv"):
         stale.unlink(missing_ok=True)
-    for stale in frames_dir.glob("frame_*_fit.png"):
+    for stale in scan_dir.glob("frame_*_fit.png"):
         stale.unlink(missing_ok=True)
+    old_frames_dir = scan_dir / "frames"
+    for stale in old_frames_dir.glob("frame_*_fit.png"):
+        stale.unlink(missing_ok=True)
+    if old_frames_dir.exists():
+        try:
+            old_frames_dir.rmdir()
+        except OSError:
+            logger.warning("Leaving non-empty legacy frames directory: %s", old_frames_dir)
 
     if files is None:
         files = discover_scan_files(data_dir, scan_number)
@@ -685,7 +696,8 @@ def process_scan(
                 parsed["tth"],
                 parsed["intensity"],
                 plot=plot_frames,
-                plot_path=str(frames_dir / f"frame_{idx:03d}_fit.png") if plot_frames else None,
+                plot_path=str(scan_dir / f"frame_{idx:03d}_fit.png") if plot_frames else None,
+                chi=parsed.get("chi"),
                 seed_center=seed_center,
                 track_window=track_window,
                 fallback_to_auto=fallback_to_auto,
@@ -702,7 +714,7 @@ def process_scan(
                 ax.set_ylabel("Intensity")
                 ax.legend()
                 fig.tight_layout()
-                fig.savefig(frames_dir / f"frame_{idx:03d}_fit.png", dpi=150)
+                fig.savefig(scan_dir / f"frame_{idx:03d}_fit.png", dpi=150)
                 plt.close(fig)
             fit_result = {
                 "center": np.nan,

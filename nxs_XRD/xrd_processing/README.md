@@ -46,6 +46,6 @@ Files:
 - `scan_N_fits.csv`
 - `sin2psi_plot.png`
 - `sin2psi_fit_params.json`
-- `frames\frame_000_fit.png` etc.
+- `frame_000_fit.png` etc.
 
 The per-scan CSV includes fit-window metadata (`window_mode`, `seed_center`, `background_lower`, `peak_lower`, `peak_upper`, `background_upper`) so tracked and automatically selected fits can be audited later.

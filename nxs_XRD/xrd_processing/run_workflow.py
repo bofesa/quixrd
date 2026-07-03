@@ -11,14 +11,14 @@ else:
     from . import sin2psi_processor as proc
 
 
-DATA_DIR = r"C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\export"
-SCANS = range(440, 451)
+DATA_DIR = r"C:\Users\bosa\local_code\33_130113 HEN"
+SCANS = range(2240, 2240+1)
 EXCLUDE_FRAMES = []
 PLOT_FRAMES = True
 BACKUP = False
-PEAK_CENTER = None
+PEAK_CENTER = 33.9
 TRACK_PEAK = True
-TRACK_WINDOW = 0.4
+TRACK_WINDOW = 1.2
 FALLBACK_TO_AUTO = True
 
 
@@ -69,3 +69,4 @@ def sin2psi_scans_fit(
 
 if __name__ == "__main__":
     sin2psi_scans_fit(SCANS, peak_center=PEAK_CENTER, track_peak=TRACK_PEAK, track_window=TRACK_WINDOW, fallback_to_auto=FALLBACK_TO_AUTO)
+    print("--- FINISHED ---")
