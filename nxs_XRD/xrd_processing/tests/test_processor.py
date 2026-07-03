@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import shutil
 import subprocess
 import sys
@@ -119,6 +120,8 @@ class ProcessorSmokeTest(unittest.TestCase):
                 track_window=0.4,
             )
             df = pd.read_csv(result["csv_path"])
+            with open(Path(result["scan_dir"]) / "sin2psi_fit_params.json", "r", encoding="utf-8") as fh:
+                summary_json = json.load(fh)
 
         for column in [
             "window_mode",
@@ -127,10 +130,100 @@ class ProcessorSmokeTest(unittest.TestCase):
             "peak_lower",
             "peak_upper",
             "background_upper",
+            "start_time",
+            "frame_time",
+            "metadata_json",
         ]:
             self.assertIn(column, df.columns)
         self.assertEqual(df.loc[0, "window_mode"], "auto")
         self.assertTrue((df.loc[1:, "window_mode"] == "seeded").any())
+        self.assertIn("metadata", summary_json)
+        self.assertEqual(summary_json["metadata"]["temperature"], 639.0)
+        self.assertEqual(summary_json["metadata"]["scan_type"], "ascan_chi")
+
+    def test_collect_sin2psi_summaries_reads_json_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export_root = Path(tmp) / "sin2psi_export"
+            scan_dir = export_root / "scan_101"
+            scan_dir.mkdir(parents=True)
+            (scan_dir / "sin2psi_fit_params.json").write_text(
+                json.dumps(
+                    {
+                        "slope": 1.2,
+                        "slope_err": 0.3,
+                        "intercept": 4.5,
+                        "intercept_err": 0.6,
+                        "n_points": 5,
+                        "metadata": {"temperature": 450.0, "start_time": "2026-01-01T00:00:00"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            df = proc.collect_sin2psi_summaries(tmp)
+
+        self.assertEqual(len(df), 1)
+        self.assertEqual(df.loc[0, "scan_number"], 101)
+        self.assertEqual(df.loc[0, "slope"], 1.2)
+        self.assertEqual(df.loc[0, "temperature"], 450.0)
+
+    def test_collect_sin2psi_summaries_falls_back_to_csv_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export_root = Path(tmp) / "sin2psi_export"
+            scan_dir = export_root / "scan_102"
+            scan_dir.mkdir(parents=True)
+            (scan_dir / "sin2psi_fit_params.json").write_text(
+                json.dumps({"slope": 2.0, "slope_err": 0.2, "intercept": 5.0, "intercept_err": 0.5}),
+                encoding="utf-8",
+            )
+            pd.DataFrame(
+                [
+                    {
+                        "frame_index": 0,
+                        "filename": "I_vs_2th_102_chi_0.txt",
+                        "scan_type": "ascan_chi",
+                        "chi": 90.0,
+                        "psi_deg": 0.0,
+                        "sin2psi": 0.0,
+                        "temperature": 500.0,
+                        "energy": 9.5,
+                        "start_time": "2026-01-01T01:00:00",
+                        "frame_time": "2026-01-01T01:00:01",
+                        "metadata_json": json.dumps({"operator": "test"}),
+                    }
+                ]
+            ).to_csv(scan_dir / "scan_102_fits.csv", index=False)
+
+            df = proc.collect_sin2psi_summaries(tmp)
+
+        self.assertEqual(df.loc[0, "temperature"], 500.0)
+        self.assertEqual(df.loc[0, "operator"], "test")
+
+    def test_plot_sin2psi_gradients_writes_errorbar_plot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export_root = Path(tmp) / "sin2psi_export"
+            for scan, slope, err, temp in [(101, 1.0, 0.1, 300.0), (102, 1.5, 0.2, 350.0)]:
+                scan_dir = export_root / f"scan_{scan}"
+                scan_dir.mkdir(parents=True)
+                (scan_dir / "sin2psi_fit_params.json").write_text(
+                    json.dumps(
+                        {
+                            "slope": slope,
+                            "slope_err": err,
+                            "intercept": 4.0,
+                            "intercept_err": 0.4,
+                            "metadata": {"temperature": temp},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            result = proc.plot_sin2psi_gradients(tmp, x="temperature", show=False)
+
+            self.assertTrue(Path(result["plot_path"]).exists())
+            self.assertTrue(Path(result["summary_path"]).exists())
+            self.assertIn("temperature", Path(result["plot_path"]).name)
+            self.assertRegex(Path(result["summary_path"]).name, r"^sin2psi_scan_summary_\d{8}_\d{6}\.csv$")
 
     def test_cli_module_import_path(self):
         completed = subprocess.run(

@@ -11,15 +11,17 @@ else:
     from . import sin2psi_processor as proc
 
 
-DATA_DIR = r"C:\Users\bosa\local_code\33_130113 HEN"
-SCANS = range(2240, 2240+1)
-EXCLUDE_FRAMES = []
+DATA_DIR = r"C:\Users\bosa\local_code\33_130113 HEN\\"
+SCANS = range(2200, 2561+1)
+# SCANS = [194, 204]
+EXCLUDE_FRAMES = [0,1]
 PLOT_FRAMES = True
 BACKUP = False
-PEAK_CENTER = 33.9
+PEAK_CENTER = None  # Set to a float value (2theta) to track a specific peak, or None for automatic fitting
 TRACK_PEAK = True
 TRACK_WINDOW = 1.2
 FALLBACK_TO_AUTO = True
+GRADIENT_X = "scan_number"
 
 
 def sin2psi_scans_fit(
@@ -67,6 +69,16 @@ def sin2psi_scans_fit(
             logging.error("! Error processing scan %s: %s", scan, exc)
 
 
+def plot_gradient_summary(x=GRADIENT_X, scans=SCANS, show=False):
+    """Plot sin2psi slope against scan number or a collected metadata column."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    result = proc.plot_sin2psi_gradients(DATA_DIR, x=x, scans=scans, save=True, show=show)
+    print(f"Wrote: {result['summary_path']}")
+    print(f"Wrote: {result['plot_path']}")
+    return result
+
+
 if __name__ == "__main__":
-    sin2psi_scans_fit(SCANS, peak_center=PEAK_CENTER, track_peak=TRACK_PEAK, track_window=TRACK_WINDOW, fallback_to_auto=FALLBACK_TO_AUTO)
+    # sin2psi_scans_fit(SCANS, peak_center=PEAK_CENTER, track_peak=TRACK_PEAK, track_window=TRACK_WINDOW, fallback_to_auto=FALLBACK_TO_AUTO)
+    plot_gradient_summary(x="scan_number")
     print("--- FINISHED ---")

@@ -267,6 +267,9 @@ def parse_txt_scan(filepath):
         "chi": None,
         "temperature": None,
         "energy": None,
+        "start_time": None,
+        "frame_time": None,
+        "metadata": {},
     }
     rows = []
     header_lines = []
@@ -295,6 +298,10 @@ def parse_txt_scan(filepath):
 
     for line in header_lines:
         norm = re.sub(r"\s+", " ", line).strip()
+        m = re.match(r"([^:=]+)\s*[:=]\s*(.+)$", norm)
+        if m:
+            key = _metadata_key(m.group(1))
+            metadata["metadata"][key] = _coerce_metadata_value(m.group(2).strip())
         m = re.search(r"scan\s*type\s*:\s*(.+)$", norm, flags=re.IGNORECASE)
         if m:
             metadata["scan_type"] = m.group(1).strip()
@@ -316,6 +323,12 @@ def parse_txt_scan(filepath):
                 metadata["energy"] = float(m.group(1))
             except Exception:
                 pass
+        m = re.search(r"\bstart\s*time\b\s*[:=]\s*(.+)$", norm, flags=re.IGNORECASE)
+        if m:
+            metadata["start_time"] = m.group(1).strip()
+        m = re.search(r"\bframe\s*time\b\s*[:=]\s*(.+)$", norm, flags=re.IGNORECASE)
+        if m:
+            metadata["frame_time"] = m.group(1).strip()
 
     if metadata["scan_type"] is None:
         logger.warning("Missing Scan Type in %s", filepath)
@@ -337,6 +350,18 @@ def parse_txt_scan(filepath):
     if arr.shape[1] >= 3:
         metadata["q"] = arr[:, 2]
     return metadata
+
+
+def _metadata_key(key):
+    return re.sub(r"_+", "_", re.sub(r"[^0-9a-zA-Z]+", "_", str(key).strip().lower())).strip("_")
+
+
+def _coerce_metadata_value(value):
+    text = str(value).strip()
+    try:
+        return float(text)
+    except Exception:
+        return text
 
 
 def _scan_name_parts(filename):
@@ -396,6 +421,9 @@ def _frame_csv_columns():
         "sin2psi",
         "temperature",
         "energy",
+        "start_time",
+        "frame_time",
+        "metadata_json",
         "peak_center",
         "peak_center_err",
         "amplitude",
@@ -536,6 +564,54 @@ def fit_frame(tth, intensity, plot=False, **fit_kwargs):
     }
 
 
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return [_json_safe(v) for v in value.tolist()]
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        value = float(value)
+    if isinstance(value, float):
+        return None if not math.isfinite(value) else value
+    if not isinstance(value, (str, bytes)):
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+    return value
+
+
+def _scan_metadata_from_df(df):
+    if df.empty:
+        return {}
+    first = df.sort_values("frame_index").iloc[0]
+    keys = [
+        "filename",
+        "scan_type",
+        "chi",
+        "psi_deg",
+        "sin2psi",
+        "temperature",
+        "energy",
+        "start_time",
+        "frame_time",
+    ]
+    metadata = {key: first.get(key) for key in keys if key in df.columns}
+    if "metadata_json" in df.columns and pd.notna(first.get("metadata_json")):
+        try:
+            extra = json.loads(first.get("metadata_json"))
+            if isinstance(extra, dict):
+                metadata.update(extra)
+        except Exception:
+            logger.warning("Could not parse metadata_json for scan summary")
+    return _json_safe(metadata)
+
+
 def perform_sin2psi_fit(df, scan_dir, excluded_frames=None):
     scan_path = Path(scan_dir)
     df = df.copy()
@@ -595,6 +671,7 @@ def perform_sin2psi_fit(df, scan_dir, excluded_frames=None):
         "excluded_frames": excluded_frames,
         "weights_used": weights_used,
         "residuals": np.asarray(resid, dtype=float).tolist(),
+        "metadata": _scan_metadata_from_df(df),
     }
     _save_sin2psi_outputs(df, summary, scan_path)
     return summary
@@ -623,7 +700,162 @@ def _save_sin2psi_outputs(df, summary, scan_dir):
     plt.close(fig)
 
     with open(json_path, "w", encoding="utf-8") as fh:
-        json.dump(summary, fh, indent=2)
+        json.dump(_json_safe(summary), fh, indent=2)
+
+
+def _scan_number_from_dir(scan_dir):
+    match = re.search(r"scan_(\d+)$", Path(scan_dir).name)
+    return int(match.group(1)) if match else None
+
+
+def _summary_dirs(data_dir, scans=None):
+    export_root = Path(data_dir) / "sin2psi_export"
+    if scans is not None:
+        scans = [scans] if isinstance(scans, int) else scans
+        return [export_root / f"scan_{int(scan)}" for scan in scans]
+    return sorted(export_root.glob("scan_*"), key=lambda p: (_scan_number_from_dir(p) is None, _scan_number_from_dir(p) or p.name))
+
+
+def _metadata_from_scan_csv(scan_dir, scan_number):
+    csv_path = Path(scan_dir) / f"scan_{scan_number}_fits.csv"
+    if not csv_path.exists():
+        return {}
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as exc:
+        logger.warning("Could not read %s: %s", csv_path, exc)
+        return {}
+    return _scan_metadata_from_df(df)
+
+
+def collect_sin2psi_summaries(data_dir, scans=None, save_csv=True, output_path=None):
+    rows = []
+    for scan_dir in _summary_dirs(data_dir, scans=scans):
+        scan_number = _scan_number_from_dir(scan_dir)
+        if scan_number is None:
+            continue
+        json_path = scan_dir / "sin2psi_fit_params.json"
+        if not json_path.exists():
+            logger.warning("Missing sin2psi fit JSON for scan %s: %s", scan_number, json_path)
+            continue
+        try:
+            with open(json_path, "r", encoding="utf-8") as fh:
+                summary = json.load(fh)
+        except Exception as exc:
+            logger.warning("Could not read %s: %s", json_path, exc)
+            continue
+
+        metadata = summary.get("metadata") if isinstance(summary.get("metadata"), dict) else {}
+        fallback_metadata = _metadata_from_scan_csv(scan_dir, scan_number)
+        for key, value in fallback_metadata.items():
+            metadata.setdefault(key, value)
+
+        row = {"scan_number": scan_number}
+        for key in [
+            "slope",
+            "slope_err",
+            "intercept",
+            "intercept_err",
+            "chi2",
+            "rms",
+            "n_points",
+        ]:
+            row[key] = summary.get(key)
+        row.update(metadata)
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("scan_number").reset_index(drop=True)
+    if save_csv:
+        export_root = Path(data_dir) / "sin2psi_export"
+        export_root.mkdir(parents=True, exist_ok=True)
+        csv_path = Path(output_path) if output_path else export_root / "sin2psi_scan_summary.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(csv_path, index=False)
+    return df
+
+
+def _safe_plot_suffix(value):
+    suffix = re.sub(r"[^0-9a-zA-Z]+", "_", str(value).strip().lower()).strip("_")
+    return suffix or "x"
+
+
+def _output_timestamp():
+    return pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+
+
+def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, show=False):
+    """
+    Plot sin2psi gradient (slope) vs a specified x-axis variable (default: scan_number).
+    args:
+        data_dir: directory containing the scan data
+        x: column name to use for the x-axis (default: "scan_number"). Options include "scan_number", "temperature", "energy", "start_time", etc.
+        scans: list of scan numbers to include (default: all scans)
+        save: whether to save the plot and summary (default: True)
+        show: whether to display the plot (default: False)
+    """
+    df = collect_sin2psi_summaries(data_dir, scans=scans, save_csv=False)
+    if df.empty:
+        raise RuntimeError("No sin2psi summaries found")
+    if x not in df.columns:
+        raise ValueError(f"Column '{x}' not found in sin2psi summary")
+
+    plot_df = df.dropna(subset=[x, "slope"]).copy()
+    if plot_df.empty:
+        raise RuntimeError(f"No usable points for slope vs {x}")
+
+    x_values = plot_df[x]
+    x_label = x
+    if "time" in str(x).lower():
+        parsed = pd.to_datetime(x_values, errors="coerce")
+        if parsed.notna().any():
+            plot_df = plot_df.loc[parsed.notna()].copy()
+            x_values = parsed.loc[parsed.notna()]
+            x_label = str(x).replace("_", " ")
+
+    yerr = None
+    if "slope_err" in plot_df.columns:
+        slope_err = pd.to_numeric(plot_df["slope_err"], errors="coerce")
+        if slope_err.notna().any():
+            yerr = slope_err.to_numpy(dtype=float)
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.errorbar(
+        x_values,
+        pd.to_numeric(plot_df["slope"], errors="coerce"),
+        yerr=yerr,
+        fmt="o-",
+        capsize=3,
+        linewidth=0.8,
+        markersize=4,
+    )
+    ax.set_xlabel(str(x_label).replace("_", " "))
+    ax.set_ylabel("sin2psi gradient (slope)")
+    ax.grid(True, linewidth=0.3)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+
+    output_path = None
+    summary_path = None
+    if save:
+        export_root = Path(data_dir) / "sin2psi_export"
+        export_root.mkdir(parents=True, exist_ok=True)
+        x_suffix = _safe_plot_suffix(x)
+        stamp = _output_timestamp()
+        summary_path = export_root / f"sin2psi_scan_summary_{stamp}.csv"
+        output_path = export_root / f"sin2psi_gradient_vs_{x_suffix}_{stamp}.png"
+        df.to_csv(summary_path, index=False)
+        fig.savefig(output_path, dpi=150)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return {
+        "summary": df,
+        "summary_path": str(summary_path) if summary_path else None,
+        "plot_path": str(output_path) if output_path else None,
+    }
 
 
 def process_scan(
@@ -761,6 +993,9 @@ def process_scan(
                 "sin2psi": sin2psi,
                 "temperature": parsed.get("temperature"),
                 "energy": parsed.get("energy"),
+                "start_time": parsed.get("start_time"),
+                "frame_time": parsed.get("frame_time"),
+                "metadata_json": json.dumps(_json_safe(parsed.get("metadata", {}))),
                 "peak_center": fit_result["center"],
                 "peak_center_err": fit_result["center_err"],
                 "amplitude": fit_result["amplitude"],

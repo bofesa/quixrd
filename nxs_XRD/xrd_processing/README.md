@@ -49,3 +49,17 @@ Files:
 - `frame_000_fit.png` etc.
 
 The per-scan CSV includes fit-window metadata (`window_mode`, `seed_center`, `background_lower`, `peak_lower`, `peak_upper`, `background_upper`) so tracked and automatically selected fits can be audited later.
+
+## Gradient Summary
+
+Processed scans can be summarized and plotted across scan number or metadata fields:
+
+```python
+from nxs_XRD.xrd_processing import sin2psi_processor as proc
+
+proc.collect_sin2psi_summaries(r"C:\path\to\export")
+proc.plot_sin2psi_gradients(r"C:\path\to\export", x="scan_number")
+proc.plot_sin2psi_gradients(r"C:\path\to\export", x="temperature")
+```
+
+The plot uses `slope` as the gradient and `slope_err` for error bars. It writes timestamped files such as `sin2psi_export\sin2psi_scan_summary_<timestamp>.csv` and `sin2psi_export\sin2psi_gradient_vs_<x>_<timestamp>.png`.

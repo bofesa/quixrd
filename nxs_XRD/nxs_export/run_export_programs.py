@@ -79,7 +79,7 @@ if __name__ == "__main__":
     delta_range = [x for x in np.arange(2150, 2200, 4)]+[x for x in np.arange(2200, 2300, 9) if x not in [2218]]+[x for x in np.arange(2300, 2330, 4)]+[x for x in np.arange(2330, 2560, 15)]
     chi_range = [x for x in np.arange(2200, 2560, 5) if x not in [2218]]
     srange = np.arange(2157, 2200, 1)
-    plot_nxs(scans = 2500, scan_types = ['chi'])
+    plot_nxs(scans = 2247, scan_types = ['chi'])
 
 
     input("Press Enter to exit...")
