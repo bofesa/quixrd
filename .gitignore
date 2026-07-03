@@ -1,0 +1,52 @@
+# Ignore all top-level files and folders by default.
+/*
+
+# Keep this ignore file tracked.
+!/.gitignore
+
+# Keep project code and working notes visible to git.
+!/Little Programs/
+!/Little Programs/**
+!/nxs_XRD/
+!/nxs_XRD/**
+
+# Python/cache artifacts inside the kept folders.
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Test, build, and tooling caches.
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+.ruff_cache/
+**/.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+**/htmlcov/
+build/
+**/build/
+dist/
+**/dist/
+*.egg-info/
+**/*.egg-info/
+
+# Local virtual environments and editor metadata.
+.venv/
+**/.venv/
+venv/
+**/venv/
+.vscode/
+**/.vscode/
+.idea/
+**/.idea/
+
+# Runtime logs and temporary files.
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp

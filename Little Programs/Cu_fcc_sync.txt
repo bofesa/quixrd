@@ -1,0 +1,8 @@
+name = Cu
+lattice = fcc
+a = 3.6147
+b = 3.6147
+c = 3.6147
+wavelength = 1.283
+min_two_theta = 20
+max_two_theta = 80

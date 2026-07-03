@@ -9,11 +9,11 @@ from typing import List, Optional
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from nxs_XRD.nxs_processing import sin2psi_processor as proc
+    from nxs_XRD.xrd_processing import sin2psi_processor as proc
 else:
     from . import sin2psi_processor as proc
 
-logger = logging.getLogger("nxs_processing.cli")
+logger = logging.getLogger("xrd_processing.cli")
 
 
 def parse_scan_spec(spec: str) -> List[int]:
@@ -46,6 +46,11 @@ def main() -> None:
     parser.add_argument("--backup", action="store_true", help="Backup scan output directory before overwrite")
     parser.add_argument("--plot-frames", dest="plot_frames", action="store_true", default=True, help="Save per-frame PNGs")
     parser.add_argument("--no-plot-frames", dest="plot_frames", action="store_false", help="Disable per-frame PNGs")
+    parser.add_argument("--peak-center", type=float, default=None, help="Initial 2theta peak center guess")
+    parser.add_argument("--track-peak", dest="track_peak", action="store_true", default=True, help="Track the fitted peak between frames")
+    parser.add_argument("--no-track-peak", dest="track_peak", action="store_false", help="Fit each frame without previous-frame peak tracking")
+    parser.add_argument("--track-window", type=float, default=0.4, help="Half-width in degrees around a seeded peak center")
+    parser.add_argument("--no-fallback-to-auto", dest="fallback_to_auto", action="store_false", default=True, help="Disable automatic retry when seeded fitting fails")
     parser.add_argument("--verbosity", default="INFO", help="Logging level")
     args = parser.parse_args()
 
@@ -66,6 +71,10 @@ def main() -> None:
     logger.info("Excluded frames: %s", exclude_frames if exclude_frames else "none")
     logger.info("Plot frames: %s", args.plot_frames)
     logger.info("Backup: %s", args.backup)
+    logger.info("Peak center: %s", args.peak_center if args.peak_center is not None else "auto")
+    logger.info("Track peak: %s", args.track_peak)
+    logger.info("Track window: %s", args.track_window)
+    logger.info("Fallback to auto: %s", args.fallback_to_auto)
 
     for scan_number in scans:
         files = proc.discover_scan_files(data_dir, scan_number)
@@ -81,6 +90,10 @@ def main() -> None:
             plot_frames=args.plot_frames,
             force=True,
             backup=args.backup,
+            peak_center=args.peak_center,
+            track_peak=args.track_peak,
+            track_window=args.track_window,
+            fallback_to_auto=args.fallback_to_auto,
         )
         logger.info("Wrote %s", result["csv_path"])
         logger.info("Wrote %s", os.path.join(result["scan_dir"], "sin2psi_plot.png"))

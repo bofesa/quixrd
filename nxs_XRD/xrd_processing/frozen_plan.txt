@@ -1,0 +1,555 @@
+User: I want to adapt this ipynb file, which reads .dat files like the attached one, so that it reads instead my .txt file format (which has information like chi and temperature in the commented out header lines, as you can see). I also want for each frame export:
+   - Image of fitting & background etc. (as in current fit_peak)
+   - csv of output values from fit_peak, such that this can be used to re-plot the fitted peak if desired. There should be one csv with all the fittings for a given scan (so for all frames chi_0, chi_1 etc. are saved in the same csv file)
+Once all the frames of a scan have been fitted, plot the peak position on sin2psi (psi=90-chi), fit to a straight line, and export both the image and the fit. It may be necessary to ignore some data, for example at high psi angles, if they deviate significantly from linear
+
+Downstream, I will be using the fitted peak positions to calculate sin-squared psi gradients. I will also want to be able to plot the position of the peaks at a single chi angle between different measurements, for example on scan number or on temperature.
+
+Currently there is functionality in the master.ipynb to calculate lattice positions and elastic constants for particular elements; scrap automatic calculation of elastic constants: basic workflow should be just to fit peaks and export sin2psi gradient+intercept. Later, these gradients can be converted to stress.
+
+Later, I will implement this into a GUI, where the user can select which scan numbers they would like to process, and select the folder containing these data etc.
+
+GitHub Copilot: I’m locating the current planning notes and the notebook path, then I’ll inspect the existing peak-fitting flow so the plan stays anchored to the actual code path.
+
+Searched for files matching `**/master.ipynb`, no matches
+
+Searched for files matching `**/*fit_peak*`, no matches
+
+Read memory
+
+The workspace doesn’t currently expose a saved memory, and the exact notebook symbol search didn’t hit yet. I’m broadening just enough to find the notebook and the peak-fitting implementation that the plan needs to reuse.
+
+Searched for files matching `**/*.ipynb`, 4 matches
+
+Searched for regex `fit_peak|sin2psi|elastic constant|lattice position`, 17 results
+
+I found the master notebook and the existing `fit_peak` and `sin2psi` sections. Next I’m checking how data is parsed and how the current outputs are structured so the plan can replace the `.dat` reader without breaking the downstream flow.The subagent call needed the workspace-supported model setting, so I’m retrying with the default. That should give us the notebook-specific anchors without starting any edits.
+
+Inspect notebook workflow and data parsing
+
+Searched for files matching `Synchrotron` · `Bessy-II-KMC-II-insitu-sin2psi-0.9/**/README.md`, 1 match
+
+Retrieving Notebook summary.
+
+Searched for regex `fit_peak|sin2psi|stress|elastic` (`Synchrotron` · `Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb`), 50 results
+
+Searched for regex `read_csv|read_table|read_fwf|np.loadtxt|open\(` (`Synchrotron` · `Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb`), 3 results
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/README.md)
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb#1-1), lines 1 to 220
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb#520-520), lines 520 to 620
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb#670-670), lines 670 to 800
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb#860-860), lines 860 to 930
+
+Searched for regex `savefig|to_csv|csv|plt\.show|plt\.plot|plt\.scatter` (`Synchrotron` · `Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb`), 18 results
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb#215-215), lines 215 to 360
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb#930-930), lines 930 to 1078
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/README.md)
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb#530-530), lines 530 to 575
+
+Searched for regex `def read_dat_file|read_dat_file\(` (`Synchrotron` · `Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb`), 2 results
+
+Searched for regex `chi|temperature|temp|#X|#S|P2|spec` (`Synchrotron` · `Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb`), 42 results
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb#678-678), lines 678 to 785
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/README.md)
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb#678-678), lines 678 to 764
+
+Searched for regex `wls_prediction_std|ols\(|weights|weighted linear regression|exclude_bad_fits|use_calculated_intercept` (`Synchrotron` · `Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb`), 23 results
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb#720-720), lines 720 to 770
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb#1047-1047), lines 1047 to 1078
+
+Searched for regex `get_elastic_data\(|Xray_elastic_constant|elastic constant|xray_constant` (`Synchrotron` · `Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb`), 23 results
+
+Searched for regex `to_excel|to_csv|savefig|plt\.savefig` (`Synchrotron` · `Bessy-II-KMC-II-insitu-sin2psi-0.9/Bessy-II-KMC-II-insitu-sin2psi-0.9/bessy_kmc_II_master.ipynb`), 1 result
+
+I have enough to draft a concrete plan. I’m recording it now so you can review the intended architecture before any code changes happen.
+
+Created memory file [](file:///c%3A/Users/bosa/AppData/Roaming/Code/User/workspaceStorage/9e7259e443d1f17670630745c8f64bf7/GitHub.copilot-chat/memory-tool/memories/MGNhNWZiNDctNDE3Yy00YmNlLWIzNDctODAzZTY5MWQ2MmEz/plan.md)
+
+## Plan: TXT Input and Peak Export Workflow
+
+Migrate the notebook workflow from SPEC-derived `.dat` scans to the new `.txt` scan exports, while keeping the existing peak fitting logic as the core fitting engine. The main goal is to normalize scan ingestion, persist per-frame fit outputs, and then run a per-scan sin2psi line fit that is exportable and reusable downstream. The elastic-constant/stress calculation path should be removed from the default workflow and left for a later conversion step.
+
+**Steps**
+1. Identify the notebook cells and helper functions that own scan ingestion, frame iteration, peak fitting, and sin2psi plotting in bessy_kmc_II_master.ipynb; treat these as the refactor boundary rather than rewriting the peak-fitting math.
+2. Add a single scan reader adapter that can parse the new `.txt` files and return the same normalized data shape the rest of the notebook expects, plus the metadata now embedded in the commented header lines, especially `chi` and `temperature`.
+3. Update the scan discovery logic to work from one export folder and the `.txt` filename convention, so a scan can be loaded as a sequence of frames like `chi_0`, `chi_1`, etc. depends on step 2.
+4. Keep the existing `fit_peak` computation and plotting behavior as the basis for each frame, but extend the per-frame output so every fit can emit both a figure and a structured row of fit results that includes enough information to recreate the fitted peak and background later. depends on step 1.
+5. Accumulate all frame-level fit rows for a scan into one CSV per scan, instead of separate per-frame CSV files, and include the scan metadata needed for downstream plotting such as scan number, temperature, `chi`, and derived `psi = 90 - chi`. depends on steps 2 and 4.
+6. After all frames in a scan are fitted, generate the sin2psi plot from the fitted peak positions, fit a straight line, and export both the plot image and the underlying line-fit results. Allow a configurable exclusion list or threshold for frames that deviate from linear behavior at high psi. depends on step 5.
+7. Remove the automatic elastic-constant selection and stress calculation from the default workflow path so the notebook’s main output becomes peak fits plus sin2psi gradient/intercept. Keep the stress conversion as a later, separate step that consumes the exported gradients. depends on step 1.
+8. Preserve or adapt the export helper so the notebook can write the new artifacts consistently: per-frame fit image, per-scan CSV, and per-scan sin2psi fit image/results. depends on steps 4-6.
+9. Leave a clean seam for later GUI integration by keeping the scan-processing entry point parameterized by scan selection and data folder rather than hard-coded notebook state. depends on steps 2-8.
+
+**Relevant files**
+- `c:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\Bessy-II-KMC-II-insitu-sin2psi-0.9\Bessy-II-KMC-II-insitu-sin2psi-0.9\bessy_kmc_II_master.ipynb` — main workflow, including the current `.dat` reader, `fit_peak`, scan orchestration, and sin2psi/stress plotting.
+- `c:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\Bessy-II-KMC-II-insitu-sin2psi-0.9\Bessy-II-KMC-II-insitu-sin2psi-0.9\README.md` — current workflow description and any user-facing notes that should reflect the new default behavior.
+- `c:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\Little Programs\plan.txt` — your working notes that already describe the target workflow and should stay aligned with the implementation plan.
+- `c:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\export\` — likely output destination for generated CSV and plot artifacts if the existing export convention is retained.
+
+**Verification**
+1. Open a representative `.txt` scan and confirm the header parser extracts `chi`, `temperature`, energy, and the 2theta/intensity columns into the normalized structure expected by the fitter.
+2. Run one scan end-to-end and confirm it produces one fit image per frame plus a single CSV containing all frame-level fit rows for that scan.
+3. Confirm the per-scan sin2psi plot is generated from the fitted peak positions and that the exported line-fit parameters match the plotted regression.
+4. Test at least one scan with a deliberately excluded high-psi frame to confirm the workflow can omit outliers without breaking the CSV or plot exports.
+5. Confirm the notebook no longer auto-computes elastic constants in the default path and that any remaining stress-related code is isolated behind a separate downstream entry point.
+
+**Decisions**
+- Default workflow scope is fit first, export results second, and stress conversion later.
+- The new `.txt` header is the source of truth for scan metadata, replacing SPEC-side metadata extraction for this workflow.
+- Peak fitting should remain centered on the existing `fit_peak` logic so behavior changes are limited to input/output plumbing and aggregation.
+- The scan-level CSV should be the canonical per-scan artifact for downstream replotting and analysis.
+
+**Further Considerations**
+1. Should the outlier exclusion for the sin2psi line fit be manual only, or should the notebook also support an automatic cutoff rule based on residuals or fit uncertainty? Recommended: support both, with manual override.
+2. Should the per-scan CSV be written next to the input scan files or into a separate export subfolder by scan number? Recommended: keep a dedicated export subfolder to avoid mixing raw and derived data.
+3. Should the notebook remain the primary interface, or should the refactor first extract a Python module that the notebook calls? Recommended: extract reusable functions first, then keep the notebook as a thin orchestrator.
+
+If you want, I can now turn this into an implementation checklist with the exact notebook cells/functions to change once you approve the approach.
+
+User: - write the new program as .py not .ipynb
+- makes sure a user input is the scan number or list of scan numbers to be processed
+- make sure the txt import only looks at files with "chi" in the name, since there are other scan types for which this workflow will not work
+- support both types of outlier exclusion, but do not implement the automatic one yet, just the manual
+- all the processed outputs should go into a subfolder of the folder containing the raw data, called sin2psi_export
+- how will you overwrite exported data if the analysis is reapeated, for example if some peaks are excluded from the sin2psi fit?
+
+GitHub Copilot: I’ve got the remaining constraints: this should become a `.py` workflow, accept scan numbers explicitly, filter to filenames containing `chi`, and export into a dedicated `sin2psi_export` folder. I’m folding those into the plan now and setting a clear repeat-run overwrite policy.
+
+Updated memory file [](file:///c%3A/Users/bosa/AppData/Roaming/Code/User/workspaceStorage/9e7259e443d1f17670630745c8f64bf7/GitHub.copilot-chat/memory-tool/memories/MGNhNWZiNDctNDE3Yy00YmNlLWIzNDctODAzZTY5MWQ2MmEz/plan.md)
+
+The plan is now aligned to your constraints: it becomes a `.py` program, takes scan number(s) as user input, filters only `.txt` files with `chi` in the name, writes everything under `sin2psi_export` inside the raw-data folder, and keeps only manual outlier exclusion for now.
+
+For repeated runs, the plan adopts deterministic overwrite behavior: reprocessing the same scan replaces that scan’s exported artifacts in place, so the latest accepted exclusions and fit results are what the export folder reflects. I also kept automatic outlier detection deferred, so it does not get wired into the first version.
+
+User: write the new .py file(s) into a subfolder of nxs_XRD. Do not limit to only filenames with chi in the name. If the filename format is "I_vs_2th_xxx_yy.txt", then look in the metadata for Scan Type: ascan_chi. If the filename format is "I_vs_2th_xxx_abc_yy.txt", then only take those where the "abc" bit is "chi"
+
+GitHub Copilot: I’m narrowing the output-location decision to the existing nxs_XRD package so the plan names a realistic home for the new `.py` entry point. I’ll quickly inspect that package layout and then fold the filename rules into the plan.
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD)
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD/nxs_processing)
+
+The package already has an empty `nxs_processing/` subfolder, which is a clean candidate for the new workflow module. I’m checking the existing launcher pattern now so the plan can align with how other programs are invoked.
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD/run_programs.py)
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD/__init__.py)
+
+I’ve got the concrete packaging decision now: the new workflow should live under nxs_processing, and scan selection should be based on filename pattern plus metadata rather than a blanket `chi` substring filter. I’m updating the plan to reflect that exact rule set and the package location.
+
+Updated memory file [](file:///c%3A/Users/bosa/AppData/Roaming/Code/User/workspaceStorage/9e7259e443d1f17670630745c8f64bf7/GitHub.copilot-chat/memory-tool/memories/MGNhNWZiNDctNDE3Yy00YmNlLWIzNDctODAzZTY5MWQ2MmEz/plan.md)
+
+The plan is updated to place the new workflow under nxs_XRD/nxs_processing, using the existing launcher pattern in run_programs.py as the likely entry-point style.
+
+The scan filter is now defined as follows: files named like I_vs_2th_xxx_yy.txt are included only when the header says Scan Type: ascan_chi, and files named like I_vs_2th_xxx_abc_yy.txt are included only when abc is chi. The export behavior stays deterministic: repeated analysis of the same scan overwrites that scan’s prior outputs in sin2psi_export so the latest exclusions and fit results are the active ones.
+
+User: Start implementation
+
+Copilot CLI: A Copilot CLI session has begun working on your request. Follow its progress in the sessions list.
+
+User: summarise the plan
+
+GitHub Copilot: Optimized tool selectionI'll create a tracked todo list that breaks the implementation into clear steps.
+
+Created 10 todos
+
+**Plan Summary**
+
+- **Goal**: Convert the notebook to a Python tool that fits peaks per-frame and exports sin2psi results.
+- **Inputs**: `.txt` scan files (use header and filename rules to select chi scans).
+- **Per-frame outputs**: image of fit + a CSV row containing fit parameters and background info.
+- **Per-scan outputs**: one aggregated CSV and a sin2psi plot with fitted gradient/intercept (manual exclusions supported).
+- **CLI**: accept a scan number or list of scan numbers and raw-data folder.
+- **Exports**: write all artifacts into `sin2psi_export` inside the raw-data folder; repeated runs overwrite that scan’s files.
+- **Scope**: keep existing `fit_peak` math, remove automatic elastic-constant/stress calculation from default flow.
+- **Location**: new code will live under nxs_processing.
+- **Next**: I will start implementing the module and update progress as I complete each todo.
+
+User: Create a detailed prompt which I can hand off to the CLI agent
+
+GitHub Copilot: Goal: implement a complete, runnable Python tool (not notebook) under nxs_XRD/nxs_processing that reads the provided .txt scans, fits peaks frame-by-frame using the current notebook’s fit_peak logic, writes per-frame images + one per-scan CSV, fits sin2psi (psi = 90 - chi) line, and exports the sin2psi plot + fit parameters. Manual exclusions supported; automatic exclusion deferred.
+
+Please implement the following — this is a hand-off prompt you can paste to the CLI agent.
+
+Task list (high level)
+- Create module: `nxs_XRD/nxs_processing/sin2psi_processor.py` (main logic) plus small helpers as needed.
+- Add a CLI runner: `nxs_XRD/nxs_processing/cli.py`.
+- Add `requirements.txt`, README.md, and a minimal test harness `nxs_XRD/nxs_processing/run_example.sh` (or equivalent Windows command).
+- Add unit/basic integration tests `nxs_XRD/nxs_processing/tests/test_processor.py` (simple smoke test).
+- Port and reuse `fit_peak` implementation from bessy_kmc_II_master.ipynb into the new module (do not change the math — preserve behaviour).
+
+Implementation details (required)
+
+1) File discovery / selection rules
+- Input: folder containing many `I_vs_2th_*.txt` files (examples are in export).
+- Two filename patterns:
+  - `I_vs_2th_xxx_yy.txt` (3 tokens between underscores): accept only if the file header contains the line `# Scan Type: ascan_chi`.
+  - `I_vs_2th_xxx_abc_yy.txt` (4 tokens): accept only if the middle `abc` token equals `chi`.
+- The parser should be robust to extra spaces; header lines start with `#`.
+- The module must parse header metadata (at minimum: `Scan Type`, `Chi`, `Temperature`, `Energy`), and the data columns (2theta/intensity/optional q). Expose parsed info via a dict: { filename, scan_type, chi, temperature, energy, tth: np.array, intensity: np.array }.
+
+2) Parsing behavior
+- Implement `parse_txt_scan(filepath) -> dict` which:
+  - Reads header lines beginning with `#` until an empty line then reads numeric columns.
+  - Extracts `Scan Type`, `Chi`, `Temperature`, `Energy` where present. `Chi` may be float.
+  - Returns numeric arrays for tth and intensity and header metadata.
+- If metadata is missing, still attempt parse and log warnings.
+
+3) Peak fitting
+- Implement `fit_frame(tth, intensity, plot=False, **fit_kwargs) -> dict`:
+  - Port `fit_peak` from the notebook (background fit + pseudo-Voigt or same model used).
+  - Return a dict with:
+    - peak position (two_theta or center) and its estimated uncertainty if available,
+    - amplitude/max intensity,
+    - fwhm,
+    - shape parameter(s) (nu/gamma, etc.),
+    - background parameters (coefficients),
+    - arrays for fitted curve `x_fit`, `y_fit` (or parameters sufficient to replot),
+    - any diagnostics needed.
+  - When `plot=True`, produce a per-frame image showing: raw data, chosen background windows, fitted background, peak-only model, combined model — matching notebook visuals.
+
+4) Per-frame outputs
+- For each frame/file produce:
+  - One PNG: `frame_{index:03d}_fit.png` placed in `sin2psi_export/scan_{scanno}/frames/`.
+  - A row appended to the per-scan CSV (see next).
+
+5) Per-scan CSV format
+- Single CSV per scan: `sin2psi_export/scan_{scanno}/scan_{scanno}_fits.csv`.
+- Header columns (min): `frame_index, filename, chi, psi_deg, temperature, peak_center, peak_center_err, amplitude, fwhm, nu, background_mean, background_median, bg_coef_0, bg_coef_1, ...` and columns to reconstruct the fitted peak if needed (e.g. `p0,p1,p2...` or `x_fit_sampled`/`y_fit_sampled` — prefer parameter fields).
+- Ensure CSV rows are deterministic and fully specify the fit to allow replotting.
+
+6) Sin2psi fit and export
+- After collecting all frames for a scan:
+  - Compute `psi = 90 - chi`, then `sin2psi = sin(psi*pi/180)^2`.
+  - Fit a straight line: `peak_center` as function of `sin2psi`.
+  - Use weighted least squares with weights = 1 / (peak_center_err**2) if errors available, else ordinary least squares.
+  - Allow manual exclusions: CLI accepts `--exclude 0,3,5` or `--exclude "0 3 5"`. These frame indices must be removed only from the sin2psi regression (but remain in CSV); mark excluded frames in CSV column `excluded_from_sin2psi`.
+  - Export:
+    - `sin2psi_export/scan_{scanno}/sin2psi_plot.png` (plot with data points, excluded points visually marked, fitted line).
+    - `sin2psi_export/scan_{scanno}/sin2psi_fit_params.json` or CSV with slope/intercept and uncertainties and fitted residuals + list of excluded frames.
+
+7) Export location and overwrite policy
+- Create folder `sin2psi_export` inside the raw-data folder you are given (not global).
+- For a scan number N, use `sin2psi_export/scan_{N}/`.
+- Overwrite policy: re-running the same scan (same scan number) should overwrite existing artifacts for that scan (i.e., writing same filenames will replace previous content). Optionally implement `--backup` which when set creates a timestamped backup folder instead of overwriting. Default: overwrite (write-mode).
+- For safety, do not delete unrelated files.
+
+8) CLI and parameters
+- Provide `cli.py` with an entry: `python -m nxs_XRD.nxs_processing.cli` or run `python nxs_XRD/nxs_processing/cli.py`.
+- CLI arguments:
+  - `--data-dir` (required) path to folder with `I_vs_2th_*.txt`.
+  - `--scan` required: single scan number or comma-separated list or range syntax (e.g. `1515` or `440-445` or `1515,1516`).
+  - `--exclude` optional: manual frame indices to exclude from sin2psi fit (per-scan or global).
+  - `--force` optional: clear/overwrite outputs without prompting (default behavior will overwrite files).
+  - `--backup` optional: enable backup-before-overwrite.
+  - `--plot-frames` optional flag to save per-frame images (default True).
+  - `--verbosity` logging level.
+- The CLI must validate input and show summary before processing.
+
+9) Tests & example run
+- Add `requirements.txt` with minimal dependencies: numpy, scipy, pandas, matplotlib, statsmodels (if used for WLS), tqdm, seaborn optional.
+- Add README with usage and example.
+- Add a quick-run script that processes one sample scan (e.g. `1515`) from export and produces outputs; include sample commands:
+
+```bash
+python -m nxs_XRD.nxs_processing.cli --data-dir ./export --scan 1515
+# with manual exclusions:
+python -m nxs_XRD.nxs_processing.cli --data-dir ./export --scan 1515 --exclude 5,6
+```
+
+10) Porting guidance
+- The notebook bessy_kmc_II_master.ipynb contains `fit_peak` and sin2psi logic. The agent should locate and port the math (not the surrounding notebook machinery).
+- Keep function signatures consistent where useful so later integration is easy.
+
+11) Logging, errors, style
+- Use logging (info/debug/warning).
+- Raise meaningful exceptions for malformed files.
+- Keep dependencies minimal.
+
+12) Acceptance criteria (what to demonstrate)
+- Running the CLI on the example export folder for `--scan 1515` produces:
+  - `sin2psi_export/scan_1515/scan_1515_fits.csv` with one row per frame,
+  - per-frame PNGs in `frames/` (if `--plot-frames`),
+  - `sin2psi_plot.png` and `sin2psi_fit_params.json`.
+- Manual exclusions flag removes frames from regression and updates `excluded_from_sin2psi` column in CSV.
+- Re-running same scan overwrites files (or creates backup if `--backup`).
+- Unit test `tests/test_processor.py` runs quickly and asserts parse + one fit returns the required fields.
+
+13) Commit & deliverables
+- Add/modify these files under nxs_processing:
+  - `sin2psi_processor.py`
+  - `cli.py`
+  - `requirements.txt`
+  - README.md
+  - `tests/test_processor.py`
+  - `run_example.sh` (or `run_example.ps1` for Windows)
+- Create a single commit with a clear message: "Add sin2psi_processor: CLI tool for fitting .txt scans and exporting sin2psi results".
+
+14) Post-implementation checks (agent must run)
+- Run the smoke test: process scan 1515 from export. Confirm the three outputs (CSV, sin2psi_plot, frame PNGs) exist.
+- Run tests.
+- Report any deviations from acceptance criteria.
+
+Hints / extras
+- For sin2psi fit, use `statsmodels.api.WLS` if available; otherwise use numpy polyfit with manual weighting.
+- Save `sin2psi_fit_params.json` with keys: slope, slope_err, intercept, intercept_err, chi2, rms, n_points, excluded_frames, weights_used.
+- Keep per-frame CSV columns stable and documented in README.
+
+Quick summary to paste to the CLI agent
+- Implement a Python package module at `nxs_XRD/nxs_processing/sin2psi_processor.py` and `cli.py` that:
+  - Parses `.txt` scans (header+data),
+  - Filters files according to the filename/header rules specified above,
+  - Ports `fit_peak` from bessy_kmc_II_master.ipynb,
+  - Produces per-frame fit PNG and per-scan CSV,
+  - Fits sin2psi vs peak position (manual exclusions supported), exports plot + fit params,
+  - Writes outputs to `sin2psi_export/scan_{scanno}/`, overwriting by default,
+  - Provide `requirements.txt`, README, tests, and a run example,
+  - Commit changes and run smoke test on export with scan 1515.
+
+If anything is ambiguous while implementing (file naming edge cases, what columns to include in CSV to re-plot exactly), ask one concise clarifying question and proceed after answer.
+
+-- End of prompt.
+
+User: how is the initial peak guess selected?
+
+GitHub Copilot: I’m checking the exact window-selection path in the processor so I can explain the initial peak guess precisely, not just infer it from the surrounding code.
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD/xrd_processing/sin2psi_processor.py#1-1), lines 1 to 260
+
+I have the selection logic in view; I’m reading the rest of the implementation so I can explain the fallback behavior too, not just the first branch.
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD/xrd_processing/sin2psi_processor.py#260-260), lines 260 to 520
+
+The initial peak guess is selected in two stages in sin2psi_processor.py.
+
+First, `_choose_fit_window()` uses `scipy.signal.find_peaks()` on the raw intensity array with a prominence threshold of 5% of the full intensity range. If that finds peaks, it picks the one with the highest intensity; if not, it falls back to `argmax(intensity)`. It then defines a small window around that index, with width `max(5, int(len(tth) * 0.02))`.
+
+Second, inside `fit_frame()`, that window is turned into the actual initial peak region. If no explicit windows are supplied, the code uses `_choose_fit_window()` and takes the local maximum within that region as `peak_idx`. That window is then passed into `fit_peak()`, where the pseudo-Voigt model gets its own parameter guesses: `two_theta` starts at the x-position of the maximum corrected intensity, `max_intensity` starts at the peak height, and `fwhm` is estimated from the width above half maximum, with fallback defaults if that estimate fails.
+
+So, in short: it first finds the strongest detected peak, then uses the local maximum in that window as the starting peak center.
+
+User: how easy would it be to implement options to either
+a) put the first guess around a user-defined position
+b) follow the same peak for all frames in a scan, if no peak is specified
+
+GitHub Copilot: Quite easy. The fitting math in sin2psi_processor.py already supports explicit fit windows via fit_peak, so both options mostly affect the window-selection logic in fit_frame and process_scan, not the peak model itself.
+
+For option a, you would add a user-supplied initial center, then build the background/peak windows around that position instead of calling _choose_fit_window(). For option b, you would use the fitted peak center from the previous frame as the seed for the next frame, with a fixed search window in degrees around that center. If no peak is specified for the first frame, you can still let the current automatic detector choose the first peak, then track that one through the rest of the scan.
+
+The only real caveat is robustness: if the peak shifts a lot, disappears, or a different peak becomes stronger, pure tracking can lock onto the wrong feature. The usual fix is to keep a fallback to the current automatic search when the local fit fails or the tracked window looks implausible.
+
+If I were to implement it, I’d add two CLI options:
+- a user-defined starting peak position, for example `--peak-center 43.2`
+- a tracking mode, for example `--track-peak`, with a window width like `--track-window 0.4`
+
+Then the logic would be:
+- first frame: use the user-supplied center if present, otherwise auto-detect
+- later frames: use the previous fitted center as the new seed
+- if a fit fails: fall back to the automatic detector for that frame only
+
+If you want, I can sketch the exact code changes in the current processor structure next.
+
+User: sketch how they would be implemented, and how they would be called from the run_workflow
+
+GitHub Copilot: I’m locating the workflow entry point first so the sketch matches the actual call path, then I’ll map the two peak-selection options onto that entry point.
+
+No matches found. Your search pattern might be excluded completely by either the search.exclude settings or .*ignore files.
+If you believe that it should have results, you can check into the .*ignore files and the exclude setting (here are some excluded patterns for reference:[**/node_modules,**/bower_components,**/*.code-search]).
+Then if you want to include those files you can call the tool again by setting "includeIgnoredFiles" to true.
+
+No matches found. Your search pattern might be excluded completely by either the search.exclude settings or .*ignore files.
+If you believe that it should have results, you can check into the .*ignore files and the exclude setting (here are some excluded patterns for reference:[**/node_modules,**/bower_components,**/*.code-search]).
+Then if you want to include those files you can call the tool again by setting "includeIgnoredFiles" to true.
+
+There doesn’t seem to be a `run_workflow` symbol yet, so I’m checking the package entry points and the scan-processing function that would own this orchestration.
+
+No matches found. Your search pattern might be excluded completely by either the search.exclude settings or .*ignore files.
+If you believe that it should have results, you can check into the .*ignore files and the exclude setting (here are some excluded patterns for reference:[**/node_modules,**/bower_components,**/*.code-search]).
+Then if you want to include those files you can call the tool again by setting "includeIgnoredFiles" to true.
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD/xrd_processing/sin2psi_processor.py#520-520), lines 520 to 724
+
+Implement them as small additions around the existing window-selection path in sin2psi_processor.py, not as changes to the peak model itself.
+
+The clean split is:
+
+```python
+def run_workflow(data_dir, scan_numbers, peak_center=None, track_peak=False, track_window=0.4, **kwargs):
+    for scan_number in scan_numbers:
+        process_scan(
+            data_dir=data_dir,
+            scan_number=scan_number,
+            peak_center=peak_center,
+            track_peak=track_peak,
+            track_window=track_window,
+            **kwargs,
+        )
+```
+
+Then inside process_scan, pass the peak-selection settings into fit_frame, and let that function decide the window for each frame.
+
+**How the two options would work**
+
+For a user-defined first guess, add something like `peak_center=None` to `fit_frame`. If it is provided, build the peak window around that value instead of calling `_choose_fit_window()`. That means the first frame can be forced to search near a known position:
+
+```python
+if peak_center is not None:
+    left = np.searchsorted(tth_arr, peak_center - track_window)
+    right = np.searchsorted(tth_arr, peak_center + track_window)
+```
+
+For tracking the same peak across frames, use the fitted center from the previous frame as the seed for the next one. In practice:
+
+- first frame: use `peak_center` if given, otherwise auto-detect
+- later frames: use `previous_fit["center"]` as the new seed
+- if the local fit fails, fall back to the automatic detector for that frame only
+
+A helper like this is enough:
+
+```python
+def _select_peak_window(tth, intensity, seed_center=None, track_window=None):
+    if seed_center is not None:
+        left = np.searchsorted(tth, seed_center - track_window)
+        right = np.searchsorted(tth, seed_center + track_window)
+        peak_idx = left + np.argmax(intensity[left:right+1])
+        return left, right, peak_idx
+    return _choose_fit_window(tth, intensity)
+```
+
+**How `run_workflow` would call it**
+
+`run_workflow` should just orchestrate scans and keep the previous center between frames:
+
+```python
+def run_workflow(...):
+    for scan_number in scan_numbers:
+        previous_center = peak_center
+        for frame in frames:
+            result = fit_frame(
+                tth,
+                intensity,
+                seed_center=previous_center,
+                track_window=track_window,
+            )
+            if result["fit_success"]:
+                previous_center = result["center"]
+```
+
+So the implementation is straightforward: add one seed parameter, add one tracking flag, and route both through the existing `fit_frame` window selection. The only thing to be careful about is fallback behavior when the peak shifts, disappears, or another feature becomes stronger.
+
+User: run_workflow is this file
+
+GitHub Copilot: I’m checking the exact `run_workflow.py` contents with line ranges so I can map the implementation sketch onto the current file precisely.
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD/xrd_processing/run_workflow.py)
+
+Yes, this is the runner. The orchestration lives in run_workflow.py, and right now `sin2psi_scans_fit()` is the entry point that loops over scans and calls `proc.process_scan()` (run_workflow.py).
+
+So the peak-seeding/tracking options should be added here as function arguments, then forwarded into `proc.process_scan()`. In practice:
+
+- add `peak_center=None`, `track_peak=False`, `track_window=0.4` to `sin2psi_scans_fit()`
+- pass them through to `process_scan()`
+- inside `process_scan()`, forward them to `fit_frame()`
+- let `fit_frame()` decide whether to use the user seed, previous-frame center, or the automatic detector
+
+This file already does the right high-level job. The next implementation step is to expand its signature and thread those options through the processor, rather than creating a separate workflow layer.
+
+User: can you implement all this?
+
+GitHub Copilot: Not in this session as configured. I can read and explain the code, but I cannot write the changes into run_workflow.py or sin2psi_processor.py from here.
+
+What I can do right now is give you the exact implementation plan or a ready-to-apply patch for:
+- peak-center seeding
+- frame-to-frame peak tracking
+- fallback to automatic peak detection
+- wiring those options through run_workflow.py
+
+If you want, I can produce the full code changes next, file by file, so you can paste them directly into the workspace.
+
+User: plan how to implement the above changes
+
+GitHub Copilot: I’m checking the current plan notes and the exact call path so I can turn the requested peak-seeding and tracking changes into a concrete implementation plan.
+
+Inspect run_workflow and peak selection flow
+
+Read memory [](file:///c%3A/Users/bosa/AppData/Roaming/Code/User/workspaceStorage/9e7259e443d1f17670630745c8f64bf7/GitHub.copilot-chat/memory-tool/memories/MGNhNWZiNDctNDE3Yy00YmNlLWIzNDctODAzZTY5MWQ2MmEz/plan.md)
+
+Searched for regex `^def |class ` (`**/nxs_XRD/xrd_processing/run_workflow.py`), 1 result
+
+Searched for regex `^def |class ` (`**/nxs_XRD/xrd_processing/sin2psi_processor.py`), 18 results
+
+Searched for regex `peak|fit|center|tracking|previous|auto|detect` (`**/nxs_XRD/xrd_processing/sin2psi_processor.py`), 142 results
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD/xrd_processing/run_workflow.py)
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD/xrd_processing/sin2psi_processor.py#120-120), lines 120 to 260
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD/xrd_processing/sin2psi_processor.py#383-383), lines 383 to 620
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD/xrd_processing/sin2psi_processor.py#620-620), lines 620 to 724
+
+Read [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD/xrd_processing/sin2psi_processor.py#330-330), lines 330 to 390
+
+No matches found. Your search pattern might be excluded completely by either the search.exclude settings or .*ignore files.
+If you believe that it should have results, you can check into the .*ignore files and the exclude setting (here are some excluded patterns for reference:[**/node_modules,**/bower_components,**/*.code-search]).
+Then if you want to include those files you can call the tool again by setting "includeIgnoredFiles" to true.
+
+Analyzed usages of `fit_peak`, 3 results
+
+Analyzed usages of `_choose_fit_window`, 2 results
+
+Analyzed usages of `fit_frame`, 2 results
+
+Analyzed usages of `process_scan`, 3 results
+
+Analyzed usages of `sin2psi_scans_fit`, 2 results
+
+I’ve confirmed the exact control points: the runner only needs argument plumbing, while the processor owns seed selection and fallback behavior. I’m re-reading the session plan at the real line range so the updated plan is precise and aligned with the saved notes.
+
+Read memory [](file:///c%3A/Users/bosa/AppData/Roaming/Code/User/workspaceStorage/9e7259e443d1f17670630745c8f64bf7/GitHub.copilot-chat/memory-tool/memories/MGNhNWZiNDctNDE3Yy00YmNlLWIzNDctODAzZTY5MWQ2MmEz/plan.md)
+
+I have the current plan and the call chain. Next I’m updating the saved plan so it explicitly includes user-seeded starts and frame-to-frame tracking, which are the real new requirements here.
+
+Updated memory file [](file:///c%3A/Users/bosa/AppData/Roaming/Code/User/workspaceStorage/9e7259e443d1f17670630745c8f64bf7/GitHub.copilot-chat/memory-tool/memories/MGNhNWZiNDctNDE3Yy00YmNlLWIzNDctODAzZTY5MWQ2MmEz/plan.md)
+
+The implementation plan now includes the two peak-seeding modes explicitly.
+
+At the orchestration level, run_workflow.py remains the entry point that will accept optional peak-seeding arguments and pass them into process_scan. The processor then owns the actual behavior: seed the first frame from a user-defined center if provided, otherwise auto-detect; for later frames, use the previous fitted center as the seed; and if the local search fails, fall back to automatic detection for that frame only.
+
+I updated the saved plan so the new step is explicit: the changes belong in the peak-selection path, not in the model fit itself. If you want, the next useful step is for me to sketch the exact function signatures for `run_workflow`, `process_scan`, and `fit_frame`.
+
+User: Start implementation
+
+GitHub Copilot: I’m moving from planning to code now: first I’ll thread peak-seeding and tracking through the processor, then I’ll expose those options from the workflow runner.
+
+Created 10 todos
+
+I’m applying the core code changes now: first the processor will learn seeded/tracked windows and fallback behavior, then the runner will expose those knobs.
+
+Apply Patch
+
+I’m retrying the processor patch with a narrower diff and explicit explanation so the seed/tracking helpers land cleanly.
+
+Generating patch (128 lines) in [](file:///c%3A/Users/bosa/OneDrive%20-%20empa.ch/WFH/Synchrotron/nxs_XRD/xrd_processing/sin2psi_processor.py)
+
+
+```
+
+```
+
+
+Made changes.

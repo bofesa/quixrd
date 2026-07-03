@@ -77,8 +77,16 @@ class S140XRD():
     def __init__(self, nxs_file_directory = './', export_directory = '',
                  flat_file_directory = './flat/', flat_file_numbers: list = [],
                  daterange: list = [20260609, 20260615]):
-        self.nxsfile_directory = nxs_file_directory #folder of the nxs data; The NXS data are in sub-folders containing the year and the date  
-        if export_directory == '' or export_directory is None:      #subfolder where the results are saved 
+        #folder of the nxs data; The NXS data are in sub-folders containing the year and the date
+        if not os.path.exists(nxs_file_directory):
+            if not os.path.exists(nxs_file_directory + '/'):
+                raise ValueError(f"Provided nxs_file_directory '{nxs_file_directory}' does not exist.")
+            else:
+                self.nxsfile_directory = nxs_file_directory + '/'
+        else:
+            self.nxsfile_directory = nxs_file_directory
+        #subfolder where the results are saved
+        if export_directory == '' or export_directory is None: 
             self.export_directory = nxs_file_directory + 'exported/'
         else:
             self.export_directory = export_directory
@@ -147,7 +155,7 @@ class S140XRD():
             args:
                 scanNo: the scan number to be processed
                 incl_q: whether to include q values in the output file
-                sort_type: whether to label the data by scan type (chi or delta or z)
+                sort_type: whether to label the data by scan type (chi or delta or z or omega) or not
                 add_metadata: whether to include metadata lines in the output file
                 showGraph: whether to display the data in a graph
         """

@@ -1,2 +1,2 @@
-"""Tests for nxs_processing."""
+"""Tests for xrd_processing."""
 

@@ -1,0 +1,8 @@
+name = k-Al2O3
+lattice = orthorhombic
+a = 4.8351
+b = 8.311
+c = 8.9363
+wavelength = 1.283
+min_two_theta = 20
+max_two_theta = 70

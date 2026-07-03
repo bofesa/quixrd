@@ -1,40 +1,63 @@
 from XPAD_XRD_nxs_export import *
 from XRD_funcs import sort_nxs_by_sample
 from XRD_spectra_anal import Spectrum
+# root_dir = 
+root_dir = "G:\\Limit\\Barbara\\Soleil_2026_06\\"
+RUNSTEPS = [3,4]
+scanNo = 1515
+scanNos = range(1, 90+1)
 
-if __name__ == "__main__":
-    root_dir = 'C:\\Users\\bosa\\OneDrive - empa.ch\\WFH\\Synchrotron\\SOLEIL Jun2026\\'
-    # s = S140XRD(nxs_file_directory = root_dir, export_directory = './export/',
+def extract_nxs():
+    # Create an instance of the S140XRD class with the specified directories and parameters
+    # s = S140XRD(nxs_file_directory = 'C:\\Users\\bosa\\OneDrive - empa.ch\\WFH\\Synchrotron\\SOLEIL Jun2026\\', export_directory = './export/',
     #             flat_file_directory = 'C:\\Users\\bosa\\OneDrive - empa.ch\\WFH\\Synchrotron\\SOLEIL Jun2026\\putz\\flat\\', flat_file_numbers = [39,], 
     #              daterange = [20260609, 20260615])
-    # s.extract_S140XRD_idx(scanNo=1515, incl_q = True)
-    # s.extract_S140XRD_chidelta(scanNo=1515, incl_q = True)
-    # s.extract_S140XRD(scanNo=350, incl_q = True, showGraph = True)
-    # s.batch_extract_S140XRD(scanNos = [1515], incl_q = True, showGraph = True)
-    # s.batch_extract_S140XRD_chidelta(scanNos = range(440, 450+1), incl_q = True, showGraph = True)
+    s = S140XRD(nxs_file_directory = root_dir,
+                export_directory = 'N:\\Vol1-Th\\Abt206\\Sam Bojarski N\\Synchrotron\\export\\',
+                flat_file_directory = 'C:\\Users\\bosa\\OneDrive - empa.ch\\WFH\\Synchrotron\\SOLEIL Jun2026\\putz\\flat\\', flat_file_numbers = [39,], 
+                daterange = [20260609, 20260615])
+    
+    #1 Extract one scan with index (point) numbers
+    if 1 in RUNSTEPS:
+        s.extract_S140XRD_idx(scanNo=scanNo, incl_q = True)
+
+    #2 Extract one scan with scantype labelling
+    if 2 in RUNSTEPS:
+        s.extract_S140XRD_chidelta(scanNo=scanNo, incl_q = True)
+    #3 Batch extract a range of scans with index (point) numbers
+    if 3 in RUNSTEPS:
+        s.batch_extract_S140XRD(scanNos = scanNos, incl_q = True, showGraph = False)
+
+    #4 Batch extract a range of scans with scantype labelling
+    if 4 in RUNSTEPS:
+        s.batch_extract_S140XRD_chidelta(scanNos = scanNos, incl_q = True, showGraph = True)
 
     # for pI in range(0, 15):
     #     s.s140_visu_one_rawImage(scanNo = 1515, pointIndex = pI, logScale = True, mini = -1, maxi = -1, save_fig_path = './scan_1515_images/')
 
-    ### TO DO: PLOT A CONTINUOUS SERIES OF 2D SCANS WITH OVERLAP
+### TO DO:
+#   PLOT A CONTINUOUS SERIES OF 2D SCANS WITH OVERLAP
+#   ADD ABILITY TO IMPORT DATA FROM SORTED DIRECTORIES, MIRRORING THE STRUCTURE OF THE SORTED DIRECTORIES
 
 
-
-
+def sort_nxs():
     spec = Spectrum(directory = './export/')
     spec.plot_Ivs2theta(scanNos = range(440, 450+1), plot_only = ['chi'], offset = 0.4, normalise = None, single_chi = False)
 
 
-    # sort_nxs_by_sample(nxs_directory = r'C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\SOLEIL Jun2026',
-    #                    sample_file = r'C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\SOLEIL Jun26 Samples.xlsx',
-    #                    output_directory = 'C:\\Users\\bosa\\OneDrive - empa.ch\\WFH\\Synchrotron\\SOLEIL Jun2026 sorted_nxs',
-    #                    export_calibrations = 'sub')
+    sort_nxs_by_sample(nxs_directory = r'C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\SOLEIL Jun2026',
+                       sample_file = r'C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\SOLEIL Jun26 Samples.xlsx',
+                       output_directory = 'C:\\Users\\bosa\\OneDrive - empa.ch\\WFH\\Synchrotron\\SOLEIL Jun2026 sorted_nxs',
+                       export_calibrations = 'sub')
 
-    # sort_nxs_by_sample(nxs_directory = r"G:\Limit\Barbara\Soleil_2026_06",
-    #                    sample_file = r'C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\SOLEIL Jun26 Samples.xlsx',
-    #                    output_directory = r"N:\Vol1-Th\Abt206\Sam Bojarski N\Synchrotron\Sorted_Data SOLEIL_2026_06",
-    #                    export_calibrations = 'sub')
+    sort_nxs_by_sample(nxs_directory = r"G:\Limit\Barbara\Soleil_2026_06",
+                       sample_file = r'C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\SOLEIL Jun26 Samples.xlsx',
+                       output_directory = r"N:\Vol1-Th\Abt206\Sam Bojarski N\Synchrotron\Sorted_Data SOLEIL_2026_06",
+                       export_calibrations = 'sub')
 
+
+if __name__ == "__main__":
+    extract_nxs()
 
 
     input("Press Enter to exit...")

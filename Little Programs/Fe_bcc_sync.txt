@@ -1,0 +1,8 @@
+name = Fe
+lattice = bcc
+a = 2.866
+b = 2.866
+c = 2.866
+wavelength = 1.283
+min_two_theta = 20
+max_two_theta = 80

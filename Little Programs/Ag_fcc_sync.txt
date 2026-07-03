@@ -1,0 +1,8 @@
+name = Ag
+lattice = fcc
+a = 4.863
+b = 4.863
+c = 4.863
+wavelength = 1.283
+min_two_theta = 20
+max_two_theta = 80

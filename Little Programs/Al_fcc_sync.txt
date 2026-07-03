@@ -1,0 +1,8 @@
+name = Al
+lattice = fcc
+a = 4.0495
+b = 4.0495
+c = 4.0495
+wavelength = 1.283
+min_two_theta = 20
+max_two_theta = 80

@@ -410,6 +410,12 @@ def _frame_csv_columns():
         "left_idx",
         "right_idx",
         "peak_idx",
+        "window_mode",
+        "seed_center",
+        "background_lower",
+        "peak_lower",
+        "peak_upper",
+        "background_upper",
         "fit_success",
         "excluded_from_sin2psi",
     ]
@@ -622,7 +628,12 @@ def process_scan(
     exclude_frames=None,
     plot_frames=True,
     force=True,
-    backup=False,):
+    backup=False,
+    peak_center=None,
+    track_peak=True,
+    track_window=0.4,
+    fallback_to_auto=True,
+):
     """
     Process a single scan: fit each frame, save per-frame results, and perform sin2psi regression.
     args:
@@ -633,6 +644,10 @@ def process_scan(
         plot_frames: bool, whether to save per-frame fit plots
         force: bool, whether to overwrite existing outputs
         backup: bool, whether to backup existing scan output directory before overwrite
+        peak_center: Optional[float], first peak center guess in 2theta degrees
+        track_peak: bool, whether to seed each frame from the previous successful fit
+        track_window: float, half-width in 2theta degrees around a seeded center
+        fallback_to_auto: bool, whether seeded fits retry with automatic peak detection
     returns: dict with keys:
         'scan_number': int, the scan number processed
         'scan_dir': str, path to the scan output directory
@@ -661,16 +676,23 @@ def process_scan(
         raise RuntimeError(f"No matching scan files found for scan {scan_number}")
 
     rows = []
+    current_seed = float(peak_center) if peak_center is not None else None
     for idx, filepath in enumerate(files):
         parsed = parse_txt_scan(filepath)
+        seed_center = current_seed if (idx == 0 or track_peak) else None
         try:
             fit_result = fit_frame(
                 parsed["tth"],
                 parsed["intensity"],
                 plot=plot_frames,
                 plot_path=str(frames_dir / f"frame_{idx:03d}_fit.png") if plot_frames else None,
+                seed_center=seed_center,
+                track_window=track_window,
+                fallback_to_auto=fallback_to_auto,
             )
             fit_success = True
+            if track_peak and np.isfinite(fit_result["center"]):
+                current_seed = fit_result["center"]
         except Exception as exc:
             logger.warning("Fit failed for %s: %s", filepath, exc)
             if plot_frames:
@@ -699,6 +721,12 @@ def process_scan(
                 "left_idx": np.nan,
                 "right_idx": np.nan,
                 "peak_idx": np.nan,
+                "window_mode": "failed",
+                "seed_center": float(seed_center) if seed_center is not None else np.nan,
+                "background_lower": np.nan,
+                "peak_lower": np.nan,
+                "peak_upper": np.nan,
+                "background_upper": np.nan,
                 "fit_success": False,
                 "x_fit": [],
                 "y_peak_fit": [],
@@ -737,6 +765,12 @@ def process_scan(
                 "left_idx": fit_result["left_idx"],
                 "right_idx": fit_result["right_idx"],
                 "peak_idx": fit_result["peak_idx"],
+                "window_mode": fit_result["window_mode"],
+                "seed_center": fit_result["seed_center"],
+                "background_lower": fit_result["background_lower"],
+                "peak_lower": fit_result["peak_lower"],
+                "peak_upper": fit_result["peak_upper"],
+                "background_upper": fit_result["background_upper"],
                 "fit_success": fit_success,
                 "excluded_from_sin2psi": False,
             }

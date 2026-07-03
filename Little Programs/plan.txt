@@ -1,0 +1,9 @@
+- update dat import to read the txt format, and txt filename format.
+    - Probably just take it from a single export directory
+- convert ipynb to py, maybe class-based.
+    -Make a plan with AI
+- for each frame export:
+    Image of fitting & background etc. (as in current fit_peak)
+    csv of output values from fit_peak, such that this can be used to re-plot the image if desired
+- scrap automatic calculation of elastic constants: basic workflow should be just to fit peaks and export sin2psi gradient+intercept
+    from this, add a second workflow after which can convert these into stress on frame or stress on temperature

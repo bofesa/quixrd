@@ -1,0 +1,8 @@
+name = a-Al2O3
+lattice = hcp
+a = 4.7589
+b = 4.7589
+c = 12.991
+wavelength = 1.283
+min_two_theta = 20
+max_two_theta = 80
