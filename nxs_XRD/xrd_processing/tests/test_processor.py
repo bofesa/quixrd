@@ -1,13 +1,17 @@
 from pathlib import Path
 import json
+import math
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
+import numpy as np
 import pandas as pd
 
+from nxs_XRD.xrd_processing import run_workflow
 from nxs_XRD.xrd_processing import sin2psi_processor as proc
 
 
@@ -224,6 +228,239 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertTrue(Path(result["summary_path"]).exists())
             self.assertIn("temperature", Path(result["plot_path"]).name)
             self.assertRegex(Path(result["summary_path"]).name, r"^sin2psi_scan_summary_\d{8}_\d{6}\.csv$")
+
+    def test_plot_sin2psi_gradients_reuses_unchanged_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export_root = Path(tmp) / "sin2psi_export"
+            scan_dir = export_root / "scan_101"
+            scan_dir.mkdir(parents=True)
+            json_path = scan_dir / "sin2psi_fit_params.json"
+            json_path.write_text(
+                json.dumps(
+                    {
+                        "slope": 1.0,
+                        "slope_err": 0.1,
+                        "intercept": 4.0,
+                        "intercept_err": 0.4,
+                        "metadata": {"temperature": 300.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            first = proc.plot_sin2psi_gradients(tmp, x="temperature", show=False)
+            second = proc.plot_sin2psi_gradients(tmp, x="temperature", show=False)
+            self.assertEqual(first["summary_path"], second["summary_path"])
+
+            json_path.write_text(
+                json.dumps(
+                    {
+                        "slope": 1.5,
+                        "slope_err": 0.1,
+                        "intercept": 4.0,
+                        "intercept_err": 0.4,
+                        "metadata": {"temperature": 300.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            third = proc.plot_sin2psi_gradients(tmp, x="temperature", show=False)
+            self.assertNotEqual(first["summary_path"], third["summary_path"])
+
+    def test_processing_params_round_trip_and_workflow_override_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            params_path = Path(tmp) / "params.json"
+            params = proc.build_processing_params(
+                data_dir="old",
+                processing_options={"peak_center": 99.0, "track_window": 0.2},
+            )
+            params_path.write_text(json.dumps(params), encoding="utf-8")
+
+            loaded = proc.load_processing_params(params_path)
+            self.assertEqual(loaded["processing_options"]["peak_center"], 99.0)
+
+            with mock.patch.object(run_workflow, "DATA_DIR", tmp), mock.patch.object(
+                run_workflow, "EXCLUDE_FRAMES", [2]
+            ), mock.patch.object(run_workflow.proc, "discover_scan_files", return_value=[]), mock.patch(
+                "logging.error"
+            ), mock.patch("builtins.print"):
+                log_path = run_workflow.sin2psi_scans_fit(
+                    [123],
+                    peak_center=12.3,
+                    track_window=0.7,
+                    params_json=params_path,
+                )
+
+            saved = proc.load_processing_params(log_path)
+            self.assertEqual(saved["processing_options"]["peak_center"], 12.3)
+            self.assertEqual(saved["processing_options"]["track_window"], 0.7)
+            self.assertEqual(saved["exclude_frames"], [2])
+            self.assertEqual(saved["scan_results"][0]["status"], "error")
+
+    def test_collect_and_plot_fwhm_by_frame_and_exact_chi(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export_root = Path(tmp) / "sin2psi_export"
+            for scan, temp in [(101, 300.0), (102, 350.0)]:
+                scan_dir = export_root / f"scan_{scan}"
+                scan_dir.mkdir(parents=True)
+                pd.DataFrame(
+                    [
+                        {
+                            "frame_index": 0,
+                            "filename": f"I_vs_2th_{scan}_chi_0.txt",
+                            "scan_type": "ascan_chi",
+                            "chi": 0.0,
+                            "psi_deg": 90.0,
+                            "sin2psi": 1.0,
+                            "temperature": temp,
+                            "energy": 12.0,
+                            "start_time": "2026-01-01T00:00:00",
+                            "frame_time": "2026-01-01T00:00:01",
+                            "metadata_json": json.dumps({"operator": "test"}),
+                            "fwhm": 0.2 + scan / 1000.0,
+                            "fwhm_err": 0.01,
+                            "fit_success": True,
+                        },
+                        {
+                            "frame_index": 1,
+                            "filename": f"I_vs_2th_{scan}_chi_1.txt",
+                            "scan_type": "ascan_chi",
+                            "chi": 5.0,
+                            "psi_deg": 85.0,
+                            "sin2psi": 0.99,
+                            "temperature": temp,
+                            "energy": 12.0,
+                            "fwhm": 0.3 + scan / 1000.0,
+                            "fwhm_err": 0.02,
+                            "fit_success": True,
+                        },
+                    ]
+                ).to_csv(scan_dir / f"scan_{scan}_fits.csv", index=False)
+
+            by_frame = proc.collect_fwhm_summaries(tmp, frame_index=1)
+            by_chi = proc.collect_fwhm_summaries(tmp, chi=5.0)
+            self.assertEqual(len(by_frame), 2)
+            self.assertEqual(len(by_chi), 2)
+            self.assertTrue((by_chi["chi"] == 5.0).all())
+
+            result = proc.plot_fwhm_trends(tmp, x="temperature", chi=5.0, show=False)
+            self.assertTrue(Path(result["plot_path"]).exists())
+            self.assertTrue(Path(result["summary_path"]).exists())
+            self.assertIn("temperature", Path(result["plot_path"]).name)
+
+    def test_refit_sin2psi_from_csv_applies_range_exclusions_without_peak_refit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scan_dir = Path(tmp) / "sin2psi_export" / "scan_10"
+            scan_dir.mkdir(parents=True)
+            pd.DataFrame(
+                [
+                    {"frame_index": 0, "chi": 90.0, "peak_center": 10.0, "peak_center_err": 0.1, "temperature": 300},
+                    {"frame_index": 1, "chi": 60.0, "peak_center": 11.0, "peak_center_err": 0.1, "temperature": 300},
+                    {"frame_index": 2, "chi": 30.0, "peak_center": 12.0, "peak_center_err": 0.1, "temperature": 300},
+                    {"frame_index": 3, "chi": 0.0, "peak_center": 20.0, "peak_center_err": 0.1, "temperature": 300},
+                ]
+            ).to_csv(scan_dir / "scan_10_fits.csv", index=False)
+
+            with mock.patch.object(proc, "fit_frame", side_effect=AssertionError("peak refit called")):
+                result = proc.refit_sin2psi_from_csv(
+                    tmp,
+                    10,
+                    excluded_frames=[0],
+                    exclude_chi_ranges=[(0.0, 0.0)],
+                    exclude_sin2psi_ranges=[(0.25, 0.25)],
+                )
+
+            df = pd.read_csv(result["csv_path"])
+            summary = proc.load_processing_params(scan_dir / "sin2psi_fit_params.json")
+            self.assertTrue(df.loc[df["frame_index"] == 0, "excluded_from_sin2psi"].iloc[0])
+            self.assertTrue(df.loc[df["frame_index"] == 3, "excluded_from_sin2psi"].iloc[0])
+            self.assertEqual(summary["excluded_frames"], [0])
+            self.assertEqual(summary["exclude_chi_ranges"], [[0.0, 0.0]])
+
+    def test_refit_sin2psi_from_csv_auto_excludes_outlier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scan_dir = Path(tmp) / "sin2psi_export" / "scan_11"
+            scan_dir.mkdir(parents=True)
+            rows = []
+            for frame, chi, center in [
+                (0, 90.0, 10.0),
+                (1, 60.0, 10.25),
+                (2, 45.0, 10.5),
+                (3, 30.0, 10.75),
+                (4, 0.0, 20.0),
+            ]:
+                rows.append({"frame_index": frame, "chi": chi, "peak_center": center, "peak_center_err": 0.1})
+            pd.DataFrame(rows).to_csv(scan_dir / "scan_11_fits.csv", index=False)
+
+            result = proc.refit_sin2psi_from_csv(
+                tmp,
+                11,
+                auto_exclude=True,
+                auto_exclude_sigma=1.0,
+                auto_exclude_max_iter=1,
+            )
+
+            summary = proc.load_processing_params(scan_dir / "sin2psi_fit_params.json")
+            df = pd.read_csv(result["csv_path"])
+            self.assertTrue(summary["auto_exclude"])
+            self.assertGreaterEqual(len(summary["auto_excluded_frames"]), 1)
+            self.assertTrue(df["excluded_from_sin2psi"].any())
+
+    def test_generate_and_apply_sin2psi_correction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export_root = Path(tmp) / "sin2psi_export"
+            ref_dir = export_root / "scan_20"
+            ref_dir.mkdir(parents=True)
+            chi_values = [90.0, 60.0, 45.0, 30.0, 0.0]
+            ref_rows = []
+            for idx, chi in enumerate(chi_values):
+                psi = 90.0 - chi
+                sin2psi = math.sin(math.radians(psi)) ** 2
+                ref_rows.append(
+                    {
+                        "frame_index": idx,
+                        "chi": chi,
+                        "psi_deg": psi,
+                        "sin2psi": sin2psi,
+                        "peak_center": 20.0 + 0.2 * sin2psi,
+                        "peak_center_err": 0.01,
+                    }
+                )
+            pd.DataFrame(ref_rows).to_csv(ref_dir / "scan_20_fits.csv", index=False)
+
+            correction_result = proc.generate_sin2psi_correction(tmp, 20, degree=1)
+            correction = proc.load_sin2psi_correction(correction_result["path"])
+            self.assertTrue(Path(correction_result["plot_path"]).exists())
+
+            sample_dir = export_root / "scan_21"
+            sample_dir.mkdir(parents=True)
+            sample_rows = []
+            for row in ref_rows:
+                correction_at_ref = float(np.polyval(correction["coefficients"], row["sin2psi"]))
+                scale = math.tan(math.radians(40.0 / 2.0)) / math.tan(
+                    math.radians(correction["reference_two_theta"] / 2.0)
+                )
+                sample_rows.append(
+                    {
+                        "frame_index": row["frame_index"],
+                        "chi": row["chi"],
+                        "psi_deg": row["psi_deg"],
+                        "sin2psi": row["sin2psi"],
+                        "peak_center": 40.0 + correction_at_ref * scale,
+                        "peak_center_err": 0.01,
+                    }
+                )
+            pd.DataFrame(sample_rows).to_csv(sample_dir / "scan_21_fits.csv", index=False)
+
+            result = proc.refit_sin2psi_from_csv(tmp, 21, correction_json=correction_result["path"])
+            summary = proc.load_processing_params(sample_dir / "sin2psi_fit_params.json")
+            df = pd.read_csv(result["csv_path"])
+
+            self.assertTrue(summary["correction_applied"])
+            self.assertEqual(summary["fit_y_column"], "peak_center_corrected")
+            self.assertIn("peak_center_corrected", df.columns)
+            self.assertTrue((sample_dir / "scan_21_sin2psi_plot.png").exists())
+            self.assertAlmostEqual(summary["slope"], 0.0, delta=2e-6)
 
     def test_cli_module_import_path(self):
         completed = subprocess.run(

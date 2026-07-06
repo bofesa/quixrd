@@ -50,3 +50,7 @@ venv/
 *.temp
 *.bak
 *.swp
+.gitignore
+
+# Working and notes files
+nxs_XRD/plans.txt

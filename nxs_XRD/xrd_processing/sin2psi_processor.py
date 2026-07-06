@@ -612,21 +612,32 @@ def _scan_metadata_from_df(df):
     return _json_safe(metadata)
 
 
-def perform_sin2psi_fit(df, scan_dir, excluded_frames=None):
-    scan_path = Path(scan_dir)
-    df = df.copy()
-    excluded_frames = sorted(set(int(x) for x in (excluded_frames or [])))
-    df["psi_deg"] = df["chi"].apply(lambda c: 90.0 - float(c) if pd.notna(c) else np.nan)
-    df["sin2psi"] = df["psi_deg"].apply(
-        lambda p: math.sin(math.radians(float(p))) ** 2 if pd.notna(p) else np.nan
-    )
-    df["excluded_from_sin2psi"] = df["frame_index"].isin(excluded_frames)
-    used = df.loc[~df["excluded_from_sin2psi"]].dropna(subset=["peak_center"])
-    if used.empty:
-        raise RuntimeError("No usable points for sin2psi regression")
+def _normalise_ranges(ranges):
+    normalised = []
+    for item in ranges or []:
+        if item is None:
+            continue
+        lower, upper = item
+        lower = -np.inf if lower is None else float(lower)
+        upper = np.inf if upper is None else float(upper)
+        if lower > upper:
+            lower, upper = upper, lower
+        normalised.append((lower, upper))
+    return normalised
 
+
+def _in_any_range(values, ranges):
+    ranges = _normalise_ranges(ranges)
+    mask = pd.Series(False, index=values.index)
+    numeric = pd.to_numeric(values, errors="coerce")
+    for lower, upper in ranges:
+        mask |= numeric.between(lower, upper, inclusive="both")
+    return mask
+
+
+def _fit_sin2psi_regression(used, y_column="peak_center"):
     x = used["sin2psi"].to_numpy(dtype=float)
-    y = used["peak_center"].to_numpy(dtype=float)
+    y = used[y_column].to_numpy(dtype=float)
     yerr = used["peak_center_err"].to_numpy(dtype=float)
     weights_used = None
 
@@ -660,7 +671,7 @@ def perform_sin2psi_fit(df, scan_dir, excluded_frames=None):
         slope_err = float(np.sqrt(max(cov[0, 0], 0.0)))
         intercept_err = float(np.sqrt(max(cov[1, 1], 0.0)))
 
-    summary = {
+    return {
         "slope": slope,
         "slope_err": slope_err,
         "intercept": intercept,
@@ -668,32 +679,305 @@ def perform_sin2psi_fit(df, scan_dir, excluded_frames=None):
         "chi2": float(np.sum(np.square(resid))),
         "rms": float(np.sqrt(np.mean(np.square(resid)))),
         "n_points": int(len(used)),
-        "excluded_frames": excluded_frames,
         "weights_used": weights_used,
         "residuals": np.asarray(resid, dtype=float).tolist(),
-        "metadata": _scan_metadata_from_df(df),
+    }, np.asarray(resid, dtype=float)
+
+
+def _sin2psi_exclusion_mask(
+    df,
+    excluded_frames=None,
+    exclude_chi_ranges=None,
+    exclude_sin2psi_ranges=None,
+):
+    mask = pd.Series(False, index=df.index)
+    excluded_frames = sorted(set(int(x) for x in (excluded_frames or [])))
+    if excluded_frames:
+        mask |= pd.to_numeric(df["frame_index"], errors="coerce").isin(excluded_frames)
+    if exclude_chi_ranges:
+        mask |= _in_any_range(df["chi"], exclude_chi_ranges)
+    if exclude_sin2psi_ranges:
+        mask |= _in_any_range(df["sin2psi"], exclude_sin2psi_ranges)
+    return mask, excluded_frames
+
+
+def _auto_exclude_sin2psi_outliers(df, base_mask, sigma=3.0, max_iter=1, y_column="peak_center"):
+    sigma = float(sigma)
+    max_iter = int(max_iter)
+    if sigma <= 0 or max_iter <= 0:
+        return base_mask.copy(), []
+
+    mask = base_mask.copy()
+    auto_frames = []
+    for _ in range(max_iter):
+        used = df.loc[~mask].dropna(subset=[y_column, "sin2psi"])
+        if len(used) <= 3:
+            break
+        _, resid = _fit_sin2psi_regression(used, y_column=y_column)
+        resid_std = float(np.nanstd(resid, ddof=1)) if len(resid) > 1 else 0.0
+        if not np.isfinite(resid_std) or resid_std <= 0:
+            break
+        worst_position = int(np.nanargmax(np.abs(resid)))
+        if abs(float(resid[worst_position])) <= sigma * resid_std:
+            break
+        used_indices = used.index.to_numpy()
+        new_index = used_indices[worst_position]
+        if mask.loc[new_index]:
+            break
+        mask.loc[new_index] = True
+        auto_frames.append(int(df.loc[new_index, "frame_index"]))
+    return mask, sorted(set(auto_frames))
+
+
+def _theta_scale(sample_two_theta, reference_two_theta):
+    sample_theta = np.radians(pd.to_numeric(sample_two_theta, errors="coerce") / 2.0)
+    reference_theta = math.radians(float(reference_two_theta) / 2.0)
+    ref_tan = math.tan(reference_theta)
+    if not np.isfinite(ref_tan) or abs(ref_tan) < 1e-12:
+        raise ValueError(f"Invalid reference two-theta for correction scaling: {reference_two_theta}")
+    return np.tan(sample_theta) / ref_tan
+
+
+def load_sin2psi_correction(correction_json):
+    with open(correction_json, "r", encoding="utf-8") as fh:
+        correction = json.load(fh)
+    if not isinstance(correction, dict):
+        raise ValueError(f"Sin2psi correction must be a JSON object: {correction_json}")
+    for key in ["coefficients", "reference_two_theta"]:
+        if key not in correction:
+            raise ValueError(f"Missing '{key}' in sin2psi correction: {correction_json}")
+    return correction
+
+
+def _apply_sin2psi_correction(df, correction):
+    corrected = df.copy()
+    coeffs = [float(value) for value in correction["coefficients"]]
+    reference_two_theta = float(correction["reference_two_theta"])
+    raw_correction = np.polyval(coeffs, pd.to_numeric(corrected["sin2psi"], errors="coerce"))
+    scale = _theta_scale(corrected["peak_center"], reference_two_theta)
+    corrected["sin2psi_correction_reference"] = raw_correction
+    corrected["sin2psi_correction_scale"] = scale
+    corrected["sin2psi_correction"] = raw_correction * scale
+    corrected["peak_center_uncorrected"] = corrected["peak_center"]
+    corrected["peak_center_corrected"] = corrected["peak_center"] - corrected["sin2psi_correction"]
+    return corrected
+
+
+def generate_sin2psi_correction(
+    data_dir,
+    scan_number,
+    degree=2,
+    output_path=None,
+    excluded_frames=None,
+    exclude_chi_ranges=None,
+    exclude_sin2psi_ranges=None,
+):
+    """
+    Generate a sin2psi correction polynomial from a reference scan.
+    args:
+        data_dir: str or Path, path to the data directory containing the reference scan CSV
+        scan_number: int, the scan number of the reference scan
+        degree: int, degree of the polynomial correction (default: 2)
+        output_path: str or Path, optional path to save the correction JSON (default: None)
+        excluded_frames: list of int, optional list of frame indices to exclude from the fit
+        exclude_chi_ranges: list of tuple, optional list of (lower, upper) chi ranges to exclude
+        exclude_sin2psi_ranges: list of tuple, optional list of (lower, upper) sin2psi ranges to exclude
+        """
+    scan_dir = Path(data_dir) / "sin2psi_export" / f"scan_{int(scan_number)}"
+    csv_path = scan_dir / f"scan_{int(scan_number)}_fits.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Missing reference scan fit CSV: {csv_path}")
+    df = pd.read_csv(csv_path)
+    df["psi_deg"] = df["chi"].apply(lambda c: 90.0 - float(c) if pd.notna(c) else np.nan)
+    df["sin2psi"] = df["psi_deg"].apply(
+        lambda p: math.sin(math.radians(float(p))) ** 2 if pd.notna(p) else np.nan
+    )
+    exclusion_mask, excluded_frames = _sin2psi_exclusion_mask(
+        df,
+        excluded_frames=excluded_frames,
+        exclude_chi_ranges=exclude_chi_ranges,
+        exclude_sin2psi_ranges=exclude_sin2psi_ranges,
+    )
+    used = df.loc[~exclusion_mask].dropna(subset=["sin2psi", "peak_center"])
+    if len(used) <= int(degree):
+        raise RuntimeError("Not enough usable reference points for requested correction polynomial degree")
+
+    yerr = pd.to_numeric(used.get("peak_center_err"), errors="coerce")
+    weights = None
+    if yerr.notna().all() and (yerr > 0).any():
+        weights = 1.0 / yerr.to_numpy(dtype=float)
+    reference_two_theta = float(np.average(used["peak_center"].to_numpy(dtype=float), weights=weights))
+    offsets = used["peak_center"].to_numpy(dtype=float) - reference_two_theta
+    coefficients = np.polyfit(
+        used["sin2psi"].to_numpy(dtype=float),
+        offsets,
+        int(degree),
+        w=weights,
+    )
+
+    correction = {
+        "type": "sin2psi_chi_polynomial_correction",
+        "created_at": _output_timestamp(),
+        "source_scan": int(scan_number),
+        "source_csv": str(csv_path),
+        "x": "sin2psi",
+        "y": "peak_center_offset_from_reference_two_theta",
+        "degree": int(degree),
+        "coefficients": [float(value) for value in coefficients],
+        "reference_two_theta": reference_two_theta,
+        "n_points": int(len(used)),
+        "excluded_frames": excluded_frames,
+        "exclude_chi_ranges": _normalise_ranges(exclude_chi_ranges),
+        "exclude_sin2psi_ranges": _normalise_ranges(exclude_sin2psi_ranges),
     }
+
+    if output_path is None:
+        output_dir = Path(data_dir) / "sin2psi_export" / "calibrations"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = _unique_path(
+            output_dir / f"sin2psi_correction_scan_{int(scan_number)}_{_output_timestamp()}.json"
+        )
+    else:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    plot_path = output_path.with_suffix(".png")
+    x_fit = np.linspace(float(used["sin2psi"].min()), float(used["sin2psi"].max()), 200)
+    y_fit = np.polyval(coefficients, x_fit)
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    plot_yerr = pd.to_numeric(used.get("peak_center_err"), errors="coerce")
+    if plot_yerr.notna().any():
+        ax.errorbar(
+            used["sin2psi"],
+            offsets,
+            yerr=plot_yerr.to_numpy(dtype=float),
+            fmt="x",
+            capsize=3,
+            label="reference points",
+        )
+    else:
+        ax.plot(used["sin2psi"], offsets, "x", label="reference points")
+    excluded = df.loc[exclusion_mask].dropna(subset=["sin2psi", "peak_center"])
+    if not excluded.empty:
+        excluded_offsets = excluded["peak_center"].to_numpy(dtype=float) - reference_two_theta
+        excluded_yerr = pd.to_numeric(excluded.get("peak_center_err"), errors="coerce")
+        if excluded_yerr.notna().any():
+            ax.errorbar(
+                excluded["sin2psi"],
+                excluded_offsets,
+                yerr=excluded_yerr.to_numpy(dtype=float),
+                fmt=".",
+                capsize=3,
+                label="excluded",
+            )
+        else:
+            ax.plot(excluded["sin2psi"], excluded_offsets, ".", label="excluded")
+    ax.plot(x_fit, y_fit, "-", linewidth=0.8, label=f"degree {int(degree)} fit")
+    ax.set_xlabel("sin2psi")
+    ax.set_ylabel("2theta offset from reference")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=150)
+    plt.close(fig)
+
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump(_json_safe(correction), fh, indent=2)
+    return {"correction": correction, "path": str(output_path), "plot_path": str(plot_path)}
+
+
+def perform_sin2psi_fit(
+    df,
+    scan_dir,
+    excluded_frames=None,
+    exclude_chi_ranges=None,
+    exclude_sin2psi_ranges=None,
+    auto_exclude=False,
+    auto_exclude_sigma=3.0,
+    auto_exclude_max_iter=1,
+    correction_json=None,
+):
+    scan_path = Path(scan_dir)
+    df = df.copy()
+    df["psi_deg"] = df["chi"].apply(lambda c: 90.0 - float(c) if pd.notna(c) else np.nan)
+    df["sin2psi"] = df["psi_deg"].apply(
+        lambda p: math.sin(math.radians(float(p))) ** 2 if pd.notna(p) else np.nan
+    )
+    correction = load_sin2psi_correction(correction_json) if correction_json else None
+    y_column = "peak_center"
+    if correction is not None:
+        df = _apply_sin2psi_correction(df, correction)
+        y_column = "peak_center_corrected"
+    exclusion_mask, excluded_frames = _sin2psi_exclusion_mask(
+        df,
+        excluded_frames=excluded_frames,
+        exclude_chi_ranges=exclude_chi_ranges,
+        exclude_sin2psi_ranges=exclude_sin2psi_ranges,
+    )
+    auto_excluded_frames = []
+    if auto_exclude:
+        exclusion_mask, auto_excluded_frames = _auto_exclude_sin2psi_outliers(
+            df,
+            exclusion_mask,
+            sigma=auto_exclude_sigma,
+            max_iter=auto_exclude_max_iter,
+            y_column=y_column,
+        )
+    df["excluded_from_sin2psi"] = exclusion_mask
+    used = df.loc[~df["excluded_from_sin2psi"]].dropna(subset=[y_column])
+    if used.empty:
+        raise RuntimeError("No usable points for sin2psi regression")
+
+    summary, resid = _fit_sin2psi_regression(used, y_column=y_column)
+    summary.update(
+        {
+        "excluded_frames": excluded_frames,
+        "exclude_chi_ranges": _normalise_ranges(exclude_chi_ranges),
+        "exclude_sin2psi_ranges": _normalise_ranges(exclude_sin2psi_ranges),
+        "auto_exclude": bool(auto_exclude),
+        "auto_exclude_sigma": float(auto_exclude_sigma),
+        "auto_exclude_max_iter": int(auto_exclude_max_iter),
+        "auto_excluded_frames": auto_excluded_frames,
+        "correction_applied": correction is not None,
+        "correction_file": str(correction_json) if correction_json else None,
+        "correction": correction,
+        "fit_y_column": y_column,
+        "metadata": _scan_metadata_from_df(df),
+        }
+    )
     _save_sin2psi_outputs(df, summary, scan_path)
     return summary
 
 
 def _save_sin2psi_outputs(df, summary, scan_dir):
-    plot_path = Path(scan_dir) / "sin2psi_plot.png"
+    scan_number = _scan_number_from_dir(scan_dir)
+    if scan_number is None:
+        plot_path = Path(scan_dir) / "sin2psi_plot.png"
+    else:
+        plot_path = Path(scan_dir) / f"scan_{scan_number}_sin2psi_plot.png"
     json_path = Path(scan_dir) / "sin2psi_fit_params.json"
 
-    used = df.loc[~df["excluded_from_sin2psi"]].dropna(subset=["peak_center"])
-    excluded = df.loc[df["excluded_from_sin2psi"]].dropna(subset=["peak_center"])
+    y_column = summary.get("fit_y_column", "peak_center")
+    used = df.loc[~df["excluded_from_sin2psi"]].dropna(subset=[y_column])
+    excluded = df.loc[df["excluded_from_sin2psi"]].dropna(subset=[y_column])
 
     fig, ax = plt.subplots(figsize=(6.5, 4.5))
-    ax.plot(used["sin2psi"], used["peak_center"], "x", label="used")
+    if summary.get("correction_applied") and "peak_center_uncorrected" in df.columns:
+        ax.plot(
+            df["sin2psi"],
+            df["peak_center_uncorrected"],
+            "x",
+            alpha=0.2,
+            label="uncorrected",
+        )
+    ax.plot(used["sin2psi"], used[y_column], "x", label="used")
     if not excluded.empty:
-        ax.plot(excluded["sin2psi"], excluded["peak_center"], ".", label="excluded")
+        ax.plot(excluded["sin2psi"], excluded[y_column], ".", label="excluded")
 
     xline = np.linspace(float(df["sin2psi"].min()), float(df["sin2psi"].max()), 200)
     yline = summary["slope"] * xline + summary["intercept"]
     ax.plot(xline, yline, "-", label="fit", linewidth=0.5, color="black")
     ax.set_xlabel("sin2psi")
-    ax.set_ylabel("peak_center")
+    ax.set_ylabel(y_column)
     ax.legend()
     fig.tight_layout()
     fig.savefig(plot_path, dpi=150)
@@ -701,6 +985,65 @@ def _save_sin2psi_outputs(df, summary, scan_dir):
 
     with open(json_path, "w", encoding="utf-8") as fh:
         json.dump(_json_safe(summary), fh, indent=2)
+
+
+def refit_sin2psi_from_csv(
+    data_dir,
+    scan_number,
+    excluded_frames=None,
+    exclude_chi_ranges=None,
+    exclude_sin2psi_ranges=None,
+    auto_exclude=False,
+    auto_exclude_sigma=3.0,
+    auto_exclude_max_iter=1,
+    correction_json=None,
+):
+    scan_dir = Path(data_dir) / "sin2psi_export" / f"scan_{int(scan_number)}"
+    csv_path = scan_dir / f"scan_{int(scan_number)}_fits.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Missing scan fit CSV: {csv_path}")
+    df = pd.read_csv(csv_path)
+    summary = perform_sin2psi_fit(
+        df,
+        str(scan_dir),
+        excluded_frames=excluded_frames,
+        exclude_chi_ranges=exclude_chi_ranges,
+        exclude_sin2psi_ranges=exclude_sin2psi_ranges,
+        auto_exclude=auto_exclude,
+        auto_exclude_sigma=auto_exclude_sigma,
+        auto_exclude_max_iter=auto_exclude_max_iter,
+        correction_json=correction_json,
+    )
+    df["psi_deg"] = df["chi"].apply(lambda c: 90.0 - float(c) if pd.notna(c) else np.nan)
+    df["sin2psi"] = df["psi_deg"].apply(
+        lambda p: math.sin(math.radians(float(p))) ** 2 if pd.notna(p) else np.nan
+    )
+    y_column = "peak_center"
+    if correction_json:
+        df = _apply_sin2psi_correction(df, load_sin2psi_correction(correction_json))
+        y_column = "peak_center_corrected"
+    exclusion_mask, _ = _sin2psi_exclusion_mask(
+        df,
+        excluded_frames=excluded_frames,
+        exclude_chi_ranges=exclude_chi_ranges,
+        exclude_sin2psi_ranges=exclude_sin2psi_ranges,
+    )
+    if auto_exclude:
+        exclusion_mask, _ = _auto_exclude_sin2psi_outliers(
+            df,
+            exclusion_mask,
+            sigma=auto_exclude_sigma,
+            max_iter=auto_exclude_max_iter,
+            y_column=y_column,
+        )
+    df["excluded_from_sin2psi"] = exclusion_mask
+    df.to_csv(csv_path, index=False)
+    return {
+        "scan_number": int(scan_number),
+        "scan_dir": str(scan_dir),
+        "csv_path": str(csv_path),
+        "summary": summary,
+    }
 
 
 def _scan_number_from_dir(scan_dir):
@@ -785,6 +1128,106 @@ def _output_timestamp():
     return pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
 
 
+def _unique_path(path):
+    path = Path(path)
+    if not path.exists():
+        return path
+    for idx in range(1, 1000):
+        candidate = path.with_name(f"{path.stem}_{idx:03d}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Could not create unique output path for {path}")
+
+
+def _latest_matching_file(root, pattern):
+    files = [path for path in Path(root).glob(pattern) if path.is_file()]
+    if not files:
+        return None
+    return max(files, key=lambda path: (path.stat().st_mtime, path.name))
+
+
+def _normalised_compare_df(df):
+    out = df.copy()
+    if "scan_number" in out.columns:
+        out = out.sort_values("scan_number")
+    out = out.reindex(sorted(out.columns), axis=1).reset_index(drop=True)
+    out = out.where(pd.notna(out), np.nan)
+    return out
+
+
+def _dataframes_match(left, right):
+    try:
+        pd.testing.assert_frame_equal(
+            _normalised_compare_df(left),
+            _normalised_compare_df(right),
+            check_dtype=False,
+            check_like=True,
+            atol=1e-9,
+            rtol=1e-9,
+        )
+        return True
+    except AssertionError:
+        return False
+
+
+def _write_or_reuse_summary(df, export_root, filename_template):
+    export_root = Path(export_root)
+    export_root.mkdir(parents=True, exist_ok=True)
+    latest = _latest_matching_file(export_root, filename_template.format(timestamp="*"))
+    if latest is not None:
+        try:
+            if _dataframes_match(df, pd.read_csv(latest)):
+                return latest
+        except Exception as exc:
+            logger.warning("Could not compare existing summary %s: %s", latest, exc)
+    output_path = _unique_path(export_root / filename_template.format(timestamp=_output_timestamp()))
+    df.to_csv(output_path, index=False)
+    return output_path
+
+
+def build_processing_params(**params):
+    return _json_safe(dict(params))
+
+
+def load_processing_params(params_json):
+    with open(params_json, "r", encoding="utf-8") as fh:
+        params = json.load(fh)
+    if not isinstance(params, dict):
+        raise ValueError(f"Processing params must be a JSON object: {params_json}")
+    return params
+
+
+def save_processing_params(params, data_dir, timestamp=None):
+    export_root = Path(data_dir) / "sin2psi_export"
+    logs_dir = export_root / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    stamp = timestamp or _output_timestamp()
+    output_path = _unique_path(logs_dir / f"sin2psi_processing_params_{stamp}.json")
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump(_json_safe(params), fh, indent=2)
+    return str(output_path)
+
+
+def _prepare_plot_frame(df, x, y):
+    if df.empty:
+        raise RuntimeError("No summary rows found")
+    if x not in df.columns:
+        raise ValueError(f"Column '{x}' not found in summary")
+    plot_df = df.dropna(subset=[x, y]).copy()
+    if plot_df.empty:
+        raise RuntimeError(f"No usable points for {y} vs {x}")
+
+    x_values = plot_df[x]
+    x_label = x
+    if "time" in str(x).lower():
+        parsed = pd.to_datetime(x_values, errors="coerce")
+        if parsed.notna().any():
+            plot_df = plot_df.loc[parsed.notna()].copy()
+            x_values = parsed.loc[parsed.notna()]
+            x_label = str(x).replace("_", " ")
+    return plot_df, x_values, x_label
+
+
 def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, show=False):
     """
     Plot sin2psi gradient (slope) vs a specified x-axis variable (default: scan_number).
@@ -796,23 +1239,7 @@ def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, sho
         show: whether to display the plot (default: False)
     """
     df = collect_sin2psi_summaries(data_dir, scans=scans, save_csv=False)
-    if df.empty:
-        raise RuntimeError("No sin2psi summaries found")
-    if x not in df.columns:
-        raise ValueError(f"Column '{x}' not found in sin2psi summary")
-
-    plot_df = df.dropna(subset=[x, "slope"]).copy()
-    if plot_df.empty:
-        raise RuntimeError(f"No usable points for slope vs {x}")
-
-    x_values = plot_df[x]
-    x_label = x
-    if "time" in str(x).lower():
-        parsed = pd.to_datetime(x_values, errors="coerce")
-        if parsed.notna().any():
-            plot_df = plot_df.loc[parsed.notna()].copy()
-            x_values = parsed.loc[parsed.notna()]
-            x_label = str(x).replace("_", " ")
+    plot_df, x_values, x_label = _prepare_plot_frame(df, x, "slope")
 
     yerr = None
     if "slope_err" in plot_df.columns:
@@ -843,8 +1270,128 @@ def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, sho
         export_root.mkdir(parents=True, exist_ok=True)
         x_suffix = _safe_plot_suffix(x)
         stamp = _output_timestamp()
-        summary_path = export_root / f"sin2psi_scan_summary_{stamp}.csv"
-        output_path = export_root / f"sin2psi_gradient_vs_{x_suffix}_{stamp}.png"
+        summary_path = _write_or_reuse_summary(df, export_root, "sin2psi_scan_summary_{timestamp}.csv")
+        output_path = _unique_path(export_root / f"sin2psi_gradient_vs_{x_suffix}_{stamp}.png")
+        fig.savefig(output_path, dpi=150)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return {
+        "summary": df,
+        "summary_path": str(summary_path) if summary_path else None,
+        "plot_path": str(output_path) if output_path else None,
+    }
+
+
+def _scan_fit_csv_path(scan_dir, scan_number):
+    return Path(scan_dir) / f"scan_{scan_number}_fits.csv"
+
+
+def _selected_fwhm_row(df, scan_number, frame_index=None, chi=None):
+    if (frame_index is None) == (chi is None):
+        raise ValueError("Specify exactly one of frame_index or chi")
+    if frame_index is not None:
+        selected = df.loc[pd.to_numeric(df["frame_index"], errors="coerce") == int(frame_index)]
+        selector = f"frame_{int(frame_index)}"
+    else:
+        selected = df.loc[pd.to_numeric(df["chi"], errors="coerce") == float(chi)]
+        selector = f"chi_{_safe_plot_suffix(chi)}"
+    if selected.empty:
+        logger.warning("No FWHM row matched %s for scan %s", selector, scan_number)
+        return None, selector
+    return selected.sort_values("frame_index").iloc[0], selector
+
+
+def collect_fwhm_summaries(data_dir, scans=None, frame_index=None, chi=None):
+    rows = []
+    selector = None
+    for scan_dir in _summary_dirs(data_dir, scans=scans):
+        scan_number = _scan_number_from_dir(scan_dir)
+        if scan_number is None:
+            continue
+        csv_path = _scan_fit_csv_path(scan_dir, scan_number)
+        if not csv_path.exists():
+            logger.warning("Missing scan fit CSV for scan %s: %s", scan_number, csv_path)
+            continue
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception as exc:
+            logger.warning("Could not read %s: %s", csv_path, exc)
+            continue
+        row, selector = _selected_fwhm_row(df, scan_number, frame_index=frame_index, chi=chi)
+        if row is None:
+            continue
+        out = {"scan_number": scan_number, "selector": selector}
+        for key in [
+            "frame_index",
+            "filename",
+            "scan_type",
+            "chi",
+            "psi_deg",
+            "sin2psi",
+            "temperature",
+            "energy",
+            "start_time",
+            "frame_time",
+            "fwhm",
+            "fwhm_err",
+            "fit_success",
+        ]:
+            if key in df.columns:
+                out[key] = row.get(key)
+        if "metadata_json" in df.columns and pd.notna(row.get("metadata_json")):
+            try:
+                extra = json.loads(row.get("metadata_json"))
+                if isinstance(extra, dict):
+                    out.update(extra)
+            except Exception:
+                logger.warning("Could not parse metadata_json for FWHM summary")
+        rows.append(_json_safe(out))
+
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result = result.sort_values("scan_number").reset_index(drop=True)
+    return result
+
+
+def plot_fwhm_trends(data_dir, x="scan_number", scans=None, frame_index=None, chi=None, save=True, show=False):
+    df = collect_fwhm_summaries(data_dir, scans=scans, frame_index=frame_index, chi=chi)
+    plot_df, x_values, x_label = _prepare_plot_frame(df, x, "fwhm")
+
+    yerr = None
+    if "fwhm_err" in plot_df.columns:
+        fwhm_err = pd.to_numeric(plot_df["fwhm_err"], errors="coerce")
+        if fwhm_err.notna().any():
+            yerr = fwhm_err.to_numpy(dtype=float)
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.errorbar(
+        x_values,
+        pd.to_numeric(plot_df["fwhm"], errors="coerce"),
+        yerr=yerr,
+        fmt="o-",
+        capsize=3,
+        linewidth=0.8,
+        markersize=4,
+    )
+    ax.set_xlabel(str(x_label).replace("_", " "))
+    ax.set_ylabel("FWHM")
+    ax.grid(True, linewidth=0.3)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+
+    output_path = None
+    summary_path = None
+    if save:
+        export_root = Path(data_dir) / "sin2psi_export"
+        export_root.mkdir(parents=True, exist_ok=True)
+        stamp = _output_timestamp()
+        selector = str(df["selector"].iloc[0]) if "selector" in df.columns and not df.empty else "selected"
+        selector_suffix = _safe_plot_suffix(selector)
+        x_suffix = _safe_plot_suffix(x)
+        summary_path = _unique_path(export_root / f"sin2psi_fwhm_summary_{stamp}.csv")
+        output_path = _unique_path(export_root / f"sin2psi_fwhm_vs_{x_suffix}_{selector_suffix}_{stamp}.png")
         df.to_csv(summary_path, index=False)
         fig.savefig(output_path, dpi=150)
     if show:
@@ -863,6 +1410,12 @@ def process_scan(
     scan_number,
     files=None,
     exclude_frames=None,
+    exclude_chi_ranges=None,
+    exclude_sin2psi_ranges=None,
+    auto_exclude=False,
+    auto_exclude_sigma=3.0,
+    auto_exclude_max_iter=1,
+    correction_json=None,
     plot_frames=True,
     force=True,
     backup=False,
@@ -878,6 +1431,10 @@ def process_scan(
         scan_number: int, the scan number to process
         files: Optional[List[str]], list of file paths to process; if None, discover files
         exclude_frames: Optional[List[int]], list of frame indices to exclude from sin2psi fit
+        exclude_chi_ranges: Optional[List[Tuple[float, float]]], chi ranges excluded from sin2psi fit
+        exclude_sin2psi_ranges: Optional[List[Tuple[float, float]]], sin2psi ranges excluded from sin2psi fit
+        auto_exclude: bool, whether to exclude large residual outliers from the sin2psi fit
+        correction_json: Optional[str], sin2psi correction JSON generated from a stress-free reference scan
         plot_frames: bool, whether to save per-frame fit plots
         force: bool, whether to overwrite existing outputs
         backup: bool, whether to backup existing scan output directory before overwrite
@@ -897,6 +1454,8 @@ def process_scan(
     _ensure_clean_scan_dir(scan_dir, backup=backup if force else False)
 
     for stale in scan_dir.glob("sin2psi_plot.png"):
+        stale.unlink(missing_ok=True)
+    for stale in scan_dir.glob(f"scan_{scan_number}_sin2psi_plot.png"):
         stale.unlink(missing_ok=True)
     for stale in scan_dir.glob("sin2psi_fit_params.json"):
         stale.unlink(missing_ok=True)
@@ -1025,15 +1584,50 @@ def process_scan(
 
     df = pd.DataFrame(rows, columns=_frame_csv_columns())
     exclude_frames = sorted(set(int(x) for x in (exclude_frames or [])))
-    if exclude_frames:
-        df["excluded_from_sin2psi"] = df["frame_index"].isin(exclude_frames)
+    exclusion_mask, _ = _sin2psi_exclusion_mask(
+        df,
+        excluded_frames=exclude_frames,
+        exclude_chi_ranges=exclude_chi_ranges,
+        exclude_sin2psi_ranges=exclude_sin2psi_ranges,
+    )
+    df["excluded_from_sin2psi"] = exclusion_mask
 
     csv_path = scan_dir / f"scan_{scan_number}_fits.csv"
     df.to_csv(csv_path, index=False)
 
-    summary = perform_sin2psi_fit(df, str(scan_dir), excluded_frames=exclude_frames)
+    summary = perform_sin2psi_fit(
+        df,
+        str(scan_dir),
+        excluded_frames=exclude_frames,
+        exclude_chi_ranges=exclude_chi_ranges,
+        exclude_sin2psi_ranges=exclude_sin2psi_ranges,
+        auto_exclude=auto_exclude,
+        auto_exclude_sigma=auto_exclude_sigma,
+        auto_exclude_max_iter=auto_exclude_max_iter,
+        correction_json=correction_json,
+    )
 
-    df["excluded_from_sin2psi"] = df["frame_index"].isin(exclude_frames)
+    df["psi_deg"] = df["chi"].apply(lambda c: 90.0 - float(c) if pd.notna(c) else np.nan)
+    df["sin2psi"] = df["psi_deg"].apply(
+        lambda p: math.sin(math.radians(float(p))) ** 2 if pd.notna(p) else np.nan
+    )
+    if correction_json:
+        df = _apply_sin2psi_correction(df, load_sin2psi_correction(correction_json))
+    exclusion_mask, _ = _sin2psi_exclusion_mask(
+        df,
+        excluded_frames=exclude_frames,
+        exclude_chi_ranges=exclude_chi_ranges,
+        exclude_sin2psi_ranges=exclude_sin2psi_ranges,
+    )
+    if auto_exclude:
+        exclusion_mask, _ = _auto_exclude_sin2psi_outliers(
+            df,
+            exclusion_mask,
+            sigma=auto_exclude_sigma,
+            max_iter=auto_exclude_max_iter,
+            y_column="peak_center_corrected" if correction_json else "peak_center",
+        )
+    df["excluded_from_sin2psi"] = exclusion_mask
     df.to_csv(csv_path, index=False)
 
     return {

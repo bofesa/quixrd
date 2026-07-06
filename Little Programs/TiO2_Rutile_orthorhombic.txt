@@ -1,0 +1,8 @@
+name = TiO2 Rutile
+lattice = orthorhombic
+a = 4.594
+b = 4.594
+c = 2.959
+wavelength = 1.283
+min_two_theta = 20
+max_two_theta = 80

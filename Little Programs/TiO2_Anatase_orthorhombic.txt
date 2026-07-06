@@ -1,0 +1,8 @@
+name = TiO2 Anatase
+lattice = orthorhombic
+a = 3.785
+b = 3.785
+c = 9.514
+wavelength = 1.283
+min_two_theta = 20
+max_two_theta = 80
