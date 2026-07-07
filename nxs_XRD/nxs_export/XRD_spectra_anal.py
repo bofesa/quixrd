@@ -169,7 +169,11 @@ class Spectrum():
                 ax.set_xlabel('2$\\theta$ (°)')
                 ax.set_ylabel('Intensity (a.u.)')
                 ax.set_yticklabels([])
-                ax.set_title('XRD Spectra')
+                if len(scanNos) == 1:
+                    scan_context = f"scan {scanNos[0]}"
+                else:
+                    scan_context = f"scans {min(scanNos)}-{max(scanNos)}"
+                ax.set_title(f"XRD spectra - {scan_context}; types: {', '.join(plot_only)}")
                 ax.grid(True, which='both')
                 ax.legend(fontsize='small', ncol=legend_columniser(len(scanNos)))
                 plt.show()

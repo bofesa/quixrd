@@ -486,6 +486,8 @@ class XRDPlotterApp:
                     unique_peaks.append(peak)
             peaks = unique_peaks
 
+            print(f"Material: {spec.name}, \nLattice: {spec.lattice_type}, \nPeaks: \n{chr(10).join(f'{peak.hkl}, {peak.two_theta:.2f}°, {peak.intensity:.2f}' for peak in peaks)}")
+
             offset = index * offset_step
             color = colors[index % len(colors)]
             label = f"{spec.name} ({spec.lattice_type})"

@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from nxs_XRD.xrd_processing import run_workflow
+from nxs_XRD.xrd_processing import gui_app
 from nxs_XRD.xrd_processing import sin2psi_processor as proc
 
 
@@ -428,7 +429,12 @@ class ProcessorSmokeTest(unittest.TestCase):
                 )
             pd.DataFrame(ref_rows).to_csv(ref_dir / "scan_20_fits.csv", index=False)
 
-            correction_result = proc.generate_sin2psi_correction(tmp, 20, degree=1)
+            correction_result = proc.generate_sin2psi_correction(
+                tmp,
+                20,
+                degree=1,
+                reference_two_theta=20.0,
+            )
             correction = proc.load_sin2psi_correction(correction_result["path"])
             self.assertTrue(Path(correction_result["plot_path"]).exists())
 
@@ -437,16 +443,19 @@ class ProcessorSmokeTest(unittest.TestCase):
             sample_rows = []
             for row in ref_rows:
                 correction_at_ref = float(np.polyval(correction["coefficients"], row["sin2psi"]))
-                scale = math.tan(math.radians(40.0 / 2.0)) / math.tan(
-                    math.radians(correction["reference_two_theta"] / 2.0)
-                )
+                peak_center = 40.0
+                for _ in range(8):
+                    scale = math.tan(math.radians(peak_center / 2.0)) / math.tan(
+                        math.radians(correction["reference_two_theta"] / 2.0)
+                    )
+                    peak_center = 40.0 + correction_at_ref * scale
                 sample_rows.append(
                     {
                         "frame_index": row["frame_index"],
                         "chi": row["chi"],
                         "psi_deg": row["psi_deg"],
                         "sin2psi": row["sin2psi"],
-                        "peak_center": 40.0 + correction_at_ref * scale,
+                        "peak_center": peak_center,
                         "peak_center_err": 0.01,
                     }
                 )
@@ -462,6 +471,50 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertTrue((sample_dir / "scan_21_sin2psi_plot.png").exists())
             self.assertAlmostEqual(summary["slope"], 0.0, delta=2e-6)
 
+    def test_generate_gaussian_process_correction_defaults_to_true_angle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ref_dir = Path(tmp) / "sin2psi_export" / "scan_30"
+            ref_dir.mkdir(parents=True)
+            rows = []
+            for idx, chi in enumerate([90.0, 60.0, 45.0, 30.0, 0.0]):
+                psi = 90.0 - chi
+                sin2psi = math.sin(math.radians(psi)) ** 2
+                rows.append(
+                    {
+                        "frame_index": idx,
+                        "chi": chi,
+                        "psi_deg": psi,
+                        "sin2psi": sin2psi,
+                        "peak_center": 30.0 + 0.1 * sin2psi,
+                        "peak_center_err": 0.01,
+                    }
+                )
+            pd.DataFrame(rows).to_csv(ref_dir / "scan_30_fits.csv", index=False)
+
+            result = proc.generate_sin2psi_correction(
+                tmp,
+                30,
+                method="gaussian_process",
+                gp_length_scale=0.5,
+            )
+            correction = proc.load_sin2psi_correction(result["path"])
+
+            self.assertEqual(correction["method"], "gaussian_process")
+            self.assertEqual(correction["y"], "peak_center")
+            self.assertFalse(correction["reference_two_theta_provided"])
+            self.assertIn("training_x", correction)
+            self.assertTrue(Path(result["plot_path"]).exists())
+            _, std = proc._gp_predict(
+                [0.0, 0.5, 1.0],
+                correction["training_x"],
+                correction["training_y"],
+                correction["training_noise"],
+                correction["gp_length_scale"],
+                correction["gp_signal_variance"],
+                return_std=True,
+            )
+            self.assertTrue((std >= 0).all())
+
     def test_cli_module_import_path(self):
         completed = subprocess.run(
             [sys.executable, "-m", "nxs_XRD.xrd_processing.cli", "--help"],
@@ -473,6 +526,22 @@ class ProcessorSmokeTest(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("--peak-center", completed.stdout)
+
+    def test_gui_layout_import_and_tabs(self):
+        try:
+            root, app = gui_app.create_app()
+        except Exception as exc:
+            self.skipTest(f"Tkinter display unavailable: {exc}")
+        try:
+            root.withdraw()
+            tabs = [app.notebook.tab(tab_id, "text") for tab_id in app.notebook.tabs()]
+            self.assertEqual(tabs, gui_app.TAB_NAMES)
+            self.assertTrue(hasattr(app, "log_text"))
+            self.assertTrue(hasattr(app, "status_bar"))
+            app.placeholder("Smoke Test")
+            self.assertIn("Smoke Test", app.status_var.get())
+        finally:
+            root.destroy()
 
 
 if __name__ == "__main__":

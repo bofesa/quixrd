@@ -769,7 +769,7 @@ class S140XRD():
         if showGraph or saveGraph:
             ax.legend(fontsize=8, loc='best', ncols=legend_columniser(len(ax.get_lines())))
             ax.grid(visible = True)
-            ax.set_title(f"Scan {scanNo}")
+            ax.set_title(f"Scan {scanNo} ({scan_type}, {deltaArray.shape[0]} points)")
             ax.set_xlabel(r"2$\theta$ (°)")
             ax.set_ylabel("Intensity (arb. units)")
             ax.set_ylim(bottom=0)

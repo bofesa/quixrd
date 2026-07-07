@@ -743,17 +743,71 @@ def load_sin2psi_correction(correction_json):
         correction = json.load(fh)
     if not isinstance(correction, dict):
         raise ValueError(f"Sin2psi correction must be a JSON object: {correction_json}")
-    for key in ["coefficients", "reference_two_theta"]:
+    method = correction.get("method", "polynomial")
+    if method == "polynomial":
+        required = ["coefficients", "reference_two_theta"]
+    elif method == "gaussian_process":
+        required = ["training_x", "training_y", "reference_two_theta", "gp_length_scale", "gp_signal_variance"]
+    else:
+        raise ValueError(f"Unknown sin2psi correction method '{method}' in {correction_json}")
+    for key in required:
         if key not in correction:
             raise ValueError(f"Missing '{key}' in sin2psi correction: {correction_json}")
     return correction
 
 
+def _gp_kernel(x1, x2, length_scale, signal_variance):
+    x1 = np.asarray(x1, dtype=float).reshape(-1, 1)
+    x2 = np.asarray(x2, dtype=float).reshape(1, -1)
+    return float(signal_variance) * np.exp(-0.5 * np.square((x1 - x2) / float(length_scale)))
+
+
+def _gp_predict(x_pred, x_train, y_train, noise, length_scale, signal_variance, return_std=False):
+    x_pred = np.asarray(x_pred, dtype=float)
+    x_train = np.asarray(x_train, dtype=float)
+    y_train = np.asarray(y_train, dtype=float)
+    noise = np.asarray(noise, dtype=float)
+    k_train = _gp_kernel(x_train, x_train, length_scale, signal_variance)
+    k_train += np.diag(np.square(noise) + 1e-10)
+    k_pred = _gp_kernel(x_pred, x_train, length_scale, signal_variance)
+    try:
+        alpha = np.linalg.solve(k_train, y_train)
+        inv_k_kpred_t = np.linalg.solve(k_train, k_pred.T)
+    except np.linalg.LinAlgError:
+        pinv = np.linalg.pinv(k_train)
+        alpha = pinv @ y_train
+        inv_k_kpred_t = pinv @ k_pred.T
+    mean = k_pred @ alpha
+    if not return_std:
+        return mean
+    k_self = np.diag(_gp_kernel(x_pred, x_pred, length_scale, signal_variance))
+    variance = np.maximum(k_self - np.sum(k_pred * inv_k_kpred_t.T, axis=1), 0.0)
+    return mean, np.sqrt(variance)
+
+
+def _evaluate_sin2psi_correction(correction, sin2psi_values):
+    method = correction.get("method", "polynomial")
+    if method == "polynomial":
+        coeffs = [float(value) for value in correction["coefficients"]]
+        return np.polyval(coeffs, pd.to_numeric(sin2psi_values, errors="coerce"))
+    if method == "gaussian_process":
+        return _gp_predict(
+            pd.to_numeric(sin2psi_values, errors="coerce"),
+            correction["training_x"],
+            correction["training_y"],
+            correction.get("training_noise", [1e-6] * len(correction["training_x"])),
+            correction["gp_length_scale"],
+            correction["gp_signal_variance"],
+        )
+    raise ValueError(f"Unknown sin2psi correction method: {method}")
+
+
 def _apply_sin2psi_correction(df, correction):
     corrected = df.copy()
-    coeffs = [float(value) for value in correction["coefficients"]]
     reference_two_theta = float(correction["reference_two_theta"])
-    raw_correction = np.polyval(coeffs, pd.to_numeric(corrected["sin2psi"], errors="coerce"))
+    raw_correction = _evaluate_sin2psi_correction(correction, corrected["sin2psi"])
+    if not correction.get("reference_two_theta_provided", True):
+        raw_correction = raw_correction - reference_two_theta
     scale = _theta_scale(corrected["peak_center"], reference_two_theta)
     corrected["sin2psi_correction_reference"] = raw_correction
     corrected["sin2psi_correction_scale"] = scale
@@ -767,6 +821,10 @@ def generate_sin2psi_correction(
     data_dir,
     scan_number,
     degree=2,
+    method="polynomial",
+    reference_two_theta=None,
+    gp_length_scale=0.25,
+    gp_signal_variance=None,
     output_path=None,
     excluded_frames=None,
     exclude_chi_ranges=None,
@@ -778,6 +836,10 @@ def generate_sin2psi_correction(
         data_dir: str or Path, path to the data directory containing the reference scan CSV
         scan_number: int, the scan number of the reference scan
         degree: int, degree of the polynomial correction (default: 2)
+        method: "polynomial" or "gaussian_process"
+        reference_two_theta: optional 2theta angle to fit offsets from; if None, fit true peak angle
+        gp_length_scale: Gaussian-process squared-exponential length scale in sin2psi units
+        gp_signal_variance: optional Gaussian-process signal variance; if None, estimated from targets
         output_path: str or Path, optional path to save the correction JSON (default: None)
         excluded_frames: list of int, optional list of frame indices to exclude from the fit
         exclude_chi_ranges: list of tuple, optional list of (lower, upper) chi ranges to exclude
@@ -806,30 +868,66 @@ def generate_sin2psi_correction(
     weights = None
     if yerr.notna().all() and (yerr > 0).any():
         weights = 1.0 / yerr.to_numpy(dtype=float)
-    reference_two_theta = float(np.average(used["peak_center"].to_numpy(dtype=float), weights=weights))
-    offsets = used["peak_center"].to_numpy(dtype=float) - reference_two_theta
-    coefficients = np.polyfit(
-        used["sin2psi"].to_numpy(dtype=float),
-        offsets,
-        int(degree),
-        w=weights,
-    )
+    peak_values = used["peak_center"].to_numpy(dtype=float)
+    if reference_two_theta is None:
+        correction_target = peak_values
+        correction_y = "peak_center"
+        correction_reference_two_theta = float(np.average(peak_values, weights=weights))
+        reference_two_theta_provided = False
+    else:
+        correction_reference_two_theta = float(reference_two_theta)
+        correction_target = peak_values - correction_reference_two_theta
+        correction_y = "peak_center_offset_from_reference_two_theta"
+        reference_two_theta_provided = True
+
+    x_train = used["sin2psi"].to_numpy(dtype=float)
+    method = str(method).lower().strip()
+    if method in {"gp", "gaussian_process", "gaussian-process"}:
+        method = "gaussian_process"
+    if method not in {"polynomial", "gaussian_process"}:
+        raise ValueError("Correction method must be 'polynomial' or 'gaussian_process'")
+    if method == "polynomial":
+        coefficients = np.polyfit(x_train, correction_target, int(degree), w=weights)
+    else:
+        coefficients = None
+        if gp_signal_variance is None:
+            gp_signal_variance = float(np.nanvar(correction_target))
+            if not np.isfinite(gp_signal_variance) or gp_signal_variance <= 0:
+                gp_signal_variance = 1.0
+    gp_noise = yerr.to_numpy(dtype=float) if yerr.notna().all() else np.full(len(used), 1e-6)
 
     correction = {
-        "type": "sin2psi_chi_polynomial_correction",
+        "type": "sin2psi_chi_correction",
+        "method": method,
         "created_at": _output_timestamp(),
         "source_scan": int(scan_number),
         "source_csv": str(csv_path),
         "x": "sin2psi",
-        "y": "peak_center_offset_from_reference_two_theta",
-        "degree": int(degree),
-        "coefficients": [float(value) for value in coefficients],
-        "reference_two_theta": reference_two_theta,
+        "y": correction_y,
+        "reference_two_theta": correction_reference_two_theta,
+        "reference_two_theta_provided": reference_two_theta_provided,
         "n_points": int(len(used)),
         "excluded_frames": excluded_frames,
         "exclude_chi_ranges": _normalise_ranges(exclude_chi_ranges),
         "exclude_sin2psi_ranges": _normalise_ranges(exclude_sin2psi_ranges),
     }
+    if method == "polynomial":
+        correction.update(
+            {
+                "degree": int(degree),
+                "coefficients": [float(value) for value in coefficients],
+            }
+        )
+    else:
+        correction.update(
+            {
+                "training_x": [float(value) for value in x_train],
+                "training_y": [float(value) for value in correction_target],
+                "training_noise": [float(value) for value in gp_noise],
+                "gp_length_scale": float(gp_length_scale),
+                "gp_signal_variance": float(gp_signal_variance),
+            }
+        )
 
     if output_path is None:
         output_dir = Path(data_dir) / "sin2psi_export" / "calibrations"
@@ -843,38 +941,62 @@ def generate_sin2psi_correction(
 
     plot_path = output_path.with_suffix(".png")
     x_fit = np.linspace(float(used["sin2psi"].min()), float(used["sin2psi"].max()), 200)
-    y_fit = np.polyval(coefficients, x_fit)
+    y_fit_std = None
+    if method == "gaussian_process":
+        y_fit, y_fit_std = _gp_predict(
+            x_fit,
+            correction["training_x"],
+            correction["training_y"],
+            correction["training_noise"],
+            correction["gp_length_scale"],
+            correction["gp_signal_variance"],
+            return_std=True,
+        )
+    else:
+        y_fit = _evaluate_sin2psi_correction(correction, x_fit)
     fig, ax = plt.subplots(figsize=(6.5, 4.5))
     plot_yerr = pd.to_numeric(used.get("peak_center_err"), errors="coerce")
     if plot_yerr.notna().any():
         ax.errorbar(
             used["sin2psi"],
-            offsets,
+            correction_target,
             yerr=plot_yerr.to_numpy(dtype=float),
             fmt="x",
             capsize=3,
             label="reference points",
         )
     else:
-        ax.plot(used["sin2psi"], offsets, "x", label="reference points")
+        ax.plot(used["sin2psi"], correction_target, "x", label="reference points")
     excluded = df.loc[exclusion_mask].dropna(subset=["sin2psi", "peak_center"])
     if not excluded.empty:
-        excluded_offsets = excluded["peak_center"].to_numpy(dtype=float) - reference_two_theta
+        excluded_targets = excluded["peak_center"].to_numpy(dtype=float)
+        if reference_two_theta_provided:
+            excluded_targets = excluded_targets - correction_reference_two_theta
         excluded_yerr = pd.to_numeric(excluded.get("peak_center_err"), errors="coerce")
         if excluded_yerr.notna().any():
             ax.errorbar(
                 excluded["sin2psi"],
-                excluded_offsets,
+                excluded_targets,
                 yerr=excluded_yerr.to_numpy(dtype=float),
                 fmt=".",
                 capsize=3,
                 label="excluded",
             )
         else:
-            ax.plot(excluded["sin2psi"], excluded_offsets, ".", label="excluded")
-    ax.plot(x_fit, y_fit, "-", linewidth=0.8, label=f"degree {int(degree)} fit")
+            ax.plot(excluded["sin2psi"], excluded_targets, ".", label="excluded")
+    fit_label = f"degree {int(degree)} fit" if method == "polynomial" else "Gaussian process fit"
+    ax.plot(x_fit, y_fit, "-", linewidth=0.8, label=fit_label)
+    if y_fit_std is not None:
+        ax.fill_between(
+            x_fit,
+            y_fit - 2.0 * y_fit_std,
+            y_fit + 2.0 * y_fit_std,
+            alpha=0.2,
+            label="GP +/- 2 sigma",
+        )
     ax.set_xlabel("sin2psi")
-    ax.set_ylabel("2theta offset from reference")
+    ax.set_ylabel("2theta offset from reference" if reference_two_theta_provided else "2theta")
+    ax.set_title(f"Correction scan {int(scan_number)} - {method.replace('_', ' ')}")
     ax.legend()
     fig.tight_layout()
     fig.savefig(plot_path, dpi=150)
@@ -978,6 +1100,10 @@ def _save_sin2psi_outputs(df, summary, scan_dir):
     ax.plot(xline, yline, "-", label="fit", linewidth=0.5, color="black")
     ax.set_xlabel("sin2psi")
     ax.set_ylabel(y_column)
+    title = f"scan {scan_number} sin2psi fit" if scan_number is not None else "sin2psi fit"
+    if summary.get("correction_applied"):
+        title += " (corrected)"
+    ax.set_title(title)
     ax.legend()
     fig.tight_layout()
     fig.savefig(plot_path, dpi=150)
@@ -1124,6 +1250,26 @@ def _safe_plot_suffix(value):
     return suffix or "x"
 
 
+def _scan_title(scans):
+    if scans is None:
+        return "all scans"
+    scans = [scans] if isinstance(scans, int) else list(scans)
+    if not scans:
+        return "no scans"
+    if len(scans) == 1:
+        return f"scan {int(scans[0])}"
+    return f"scans {int(min(scans))}-{int(max(scans))}"
+
+
+def _selector_title(selector):
+    text = str(selector)
+    if text.startswith("frame_"):
+        return f"frame {text.split('_', 1)[1]}"
+    if text.startswith("chi_"):
+        return f"chi={text.split('_', 1)[1].replace('_', '.')}"
+    return text.replace("_", " ")
+
+
 def _output_timestamp():
     return pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
 
@@ -1259,6 +1405,7 @@ def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, sho
     )
     ax.set_xlabel(str(x_label).replace("_", " "))
     ax.set_ylabel("sin2psi gradient (slope)")
+    ax.set_title(f"sin2psi gradient vs {str(x_label).replace('_', ' ')} - {_scan_title(scans)}")
     ax.grid(True, linewidth=0.3)
     fig.autofmt_xdate()
     fig.tight_layout()
@@ -1377,6 +1524,8 @@ def plot_fwhm_trends(data_dir, x="scan_number", scans=None, frame_index=None, ch
     )
     ax.set_xlabel(str(x_label).replace("_", " "))
     ax.set_ylabel("FWHM")
+    selector = str(df["selector"].iloc[0]) if "selector" in df.columns and not df.empty else "selected"
+    ax.set_title(f"FWHM {_selector_title(selector)} vs {str(x_label).replace('_', ' ')} - {_scan_title(scans)}")
     ax.grid(True, linewidth=0.3)
     fig.autofmt_xdate()
     fig.tight_layout()
@@ -1387,7 +1536,6 @@ def plot_fwhm_trends(data_dir, x="scan_number", scans=None, frame_index=None, ch
         export_root = Path(data_dir) / "sin2psi_export"
         export_root.mkdir(parents=True, exist_ok=True)
         stamp = _output_timestamp()
-        selector = str(df["selector"].iloc[0]) if "selector" in df.columns and not df.empty else "selected"
         selector_suffix = _safe_plot_suffix(selector)
         x_suffix = _safe_plot_suffix(x)
         summary_path = _unique_path(export_root / f"sin2psi_fwhm_summary_{stamp}.csv")
@@ -1503,6 +1651,11 @@ def process_scan(
                 ax.plot(parsed["tth"], parsed["intensity"], "b-", label="data")
                 ax.set_xlabel("2theta")
                 ax.set_ylabel("Intensity")
+                psi_text = ""
+                chi = parsed.get("chi")
+                if chi is not None and pd.notna(chi):
+                    psi_text = f", psi={90.0 - float(chi):.3f}"
+                ax.set_title(f"scan {scan_number} frame {idx:03d}{psi_text} - fit failed")
                 ax.legend()
                 fig.tight_layout()
                 fig.savefig(scan_dir / f"frame_{idx:03d}_fit.png", dpi=150)

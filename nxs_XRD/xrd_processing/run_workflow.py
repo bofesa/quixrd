@@ -13,7 +13,9 @@ else:
 
 DATA_DIR = r"C:\Users\bosa\local_code\22_Al-AlOH as-dep\\"
 # SCANS = range(2156, 2561+1)
-SCANS = range(209, 230)# 348+1)       # Al
+SCANS = range(209, 348+1)       # Al, 2theta 31.75
+# SCANS = range(562, 628+1)       # Cu at 2theta 41.6
+# SCANS = range(766, 848+1)   # Cu-Al
 EXCLUDE_FRAMES = []
 EXCLUDE_CHI_RANGES = []
 EXCLUDE_SIN2PSI_RANGES = []
@@ -23,7 +25,7 @@ AUTO_EXCLUDE_MAX_ITER = 1
 CORRECTION_JSON = None
 PLOT_FRAMES = True
 BACKUP = False
-PEAK_CENTER = 31.8  # Set to a float value (2theta) to track a specific peak, or None for automatic fitting
+PEAK_CENTER = 41.6  # Set to a float value (2theta) to track a specific peak, or None for automatic fitting
 TRACK_PEAK = True
 TRACK_WINDOW = 1.0
 FALLBACK_TO_AUTO = True
@@ -31,10 +33,11 @@ GRADIENT_X = "temp"
 PARAMS_JSON = None
 _DEFAULT = object()
 
-DATA_DIR = r"C:\Users\bosa\local_code\00_White paint on Si\\"
-SCANS = [197, 202]
-PEAK_CENTER = 59.1
-TRACK_WINDOW = 0.3
+### CORRECTION CURVES
+# DATA_DIR = r"C:\Users\bosa\local_code\00_White paint on Si\\"
+# SCANS = [197, 202]
+# PEAK_CENTER = 59.1
+# TRACK_WINDOW = 0.3
 
 
 
@@ -258,12 +261,25 @@ def refit_sin2psi_trends(
     return log_path
 
 
-def generate_correction_curve(folder_path, reference_scan, degree=2, output_path=None):
+def generate_correction_curve(
+    folder_path,
+    reference_scan,
+    degree=2,
+    output_path=None,
+    reference_two_theta=None,
+    method="polynomial",
+    gp_length_scale=0.25,
+    gp_signal_variance=None,
+):
     """Generate a sin2psi correction JSON from a stress-free reference scan."""
     result = proc.generate_sin2psi_correction(
         folder_path,
         reference_scan,
         degree=degree,
+        method=method,
+        reference_two_theta=reference_two_theta,
+        gp_length_scale=gp_length_scale,
+        gp_signal_variance=gp_signal_variance,
         output_path=output_path,
         excluded_frames=None,
         exclude_chi_ranges=None,
@@ -294,7 +310,12 @@ def plot_fwhm_summary(x="scan_number", frame_index=None, chi=None, scans=_DEFAUL
 
 if __name__ == "__main__":
     # sin2psi_scans_fit(SCANS, peak_center=PEAK_CENTER, track_peak=TRACK_PEAK, track_window=TRACK_WINDOW, fallback_to_auto=FALLBACK_TO_AUTO)
-    # plot_gradient_summary(x="scan_number")
-
-    generate_correction_curve(r"C:\Users\bosa\local_code\00_White paint on Si\\", reference_scan=204, degree=2, output_path=None)
+    plot_gradient_summary(x="temperature", scans=SCANS, show=False)
+    # plot_fwhm_summary(x="temperature", frame_index=7, scans=SCANS)
+    
+    # # Calibration scans. [scan_number, reference_two_theta, peak_hkl]
+    # calib_params = [[202, 58.93, (1, 3, 1)], [203, 46.53, (2, 2, 0)], [204, 34.11, (1, 1, 1)],      # Correct z
+    #                 [197, 58.93, (1, 3, 1)], [196, 46.53, (2, 2, 0)], [197, 34.11, (1, 1, 1)]]      # Incorrect z
+    # for scan, ref_2theta, hkl in calib_params[:3]:  # Process only the first three calibration scans
+    #     generate_correction_curve(r"C:\Users\bosa\local_code\00_White paint on Si\\", reference_scan=scan, degree=2, output_path=None, reference_two_theta=ref_2theta, method="gaussian_process", )
     print("--- FINISHED ---")

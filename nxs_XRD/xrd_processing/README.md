@@ -90,9 +90,15 @@ A stress-free reference scan can be used to generate a chi/psi correction curve:
 from nxs_XRD.xrd_processing.run_workflow import generate_correction_curve
 
 generate_correction_curve(r"C:\path\to\reference_export", reference_scan=120, degree=2)
+generate_correction_curve(
+    r"C:\path\to\reference_export",
+    reference_scan=120,
+    method="gaussian_process",
+    gp_length_scale=0.25,
+)
 ```
 
-This writes a JSON file and matching PNG plot under `sin2psi_export\calibrations`. Use the JSON file in a full run or a trend-only refit:
+By default the correction is fit to the true fitted 2theta angle. Pass `reference_two_theta=...` to fit offsets from a chosen reference angle instead. This writes a JSON file and matching PNG plot under `sin2psi_export\calibrations`. Use the JSON file in a full run or a trend-only refit:
 
 ```python
 sin2psi_scans_fit(SCANS, correction_json=r"C:\path\to\sin2psi_correction_scan_120_20260706_120000.json")
