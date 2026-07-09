@@ -7,6 +7,14 @@ Python tool for fitting `I_vs_2th_*.txt` scans frame-by-frame and exporting:
 - `sin2psi_plot.png`
 - `sin2psi_fit_params.json`
 
+## Credits and provenance
+
+The sin2psi analysis workflow implemented here is based on
+[`materialsguy/Bessy-II-KMC-II-insitu-sin2psi`](https://github.com/materialsguy/Bessy-II-KMC-II-insitu-sin2psi),
+archived at [https://doi.org/10.5281/zenodo.17349576](https://doi.org/10.5281/zenodo.17349576).
+
+The NXS/XPAD export functionality builds on SOLEIL XPAD-S140 export routines credited to Pierre-Olivier Renault and the original NXS export-function authors, with local adaptations in this repository for sorted sample trees, metadata handling, and GUI/workflow integration.
+
 ## Usage
 
 ```powershell
@@ -125,13 +133,23 @@ sin2psi_scans_fit(SCANS, params_json=r"C:\path\to\sin2psi_processing_params_2026
 
 Imported values act as defaults; the current `run_workflow.py` constants and function arguments override them.
 
-## FWHM Trends
+## FWHM and Peak-Position Trends
 
-FWHM can be plotted for one exact frame number or one exact chi value:
+FWHM can be plotted for one exact frame number, several frame numbers, one chi value, or several chi values on the same plot. Chi matching uses a 0.1 degree tolerance:
 
 ```python
 proc.plot_fwhm_trends(r"C:\path\to\export", x="scan_number", frame_index=2)
+proc.plot_fwhm_trends(r"C:\path\to\export", x="scan_number", frame_index=[0, 2, 4])
 proc.plot_fwhm_trends(r"C:\path\to\export", x="temperature", chi=5.0)
+proc.plot_fwhm_trends(r"C:\path\to\export", x="temperature", chi=[0.0, 5.0, 10.0])
 ```
 
-The plot uses `fwhm_err` as error bars when available and writes timestamped `sin2psi_fwhm_summary_<timestamp>.csv` and `sin2psi_fwhm_vs_<x>_<selector>_<timestamp>.png` files.
+Peak position can be plotted in the same way:
+
+```python
+proc.plot_peak_position_trends(r"C:\path\to\export", x="scan_number", chi=5.0)
+proc.plot_peak_position_trends(r"C:\path\to\export", x="temperature", chi=[0.0, 5.0, 10.0])
+proc.plot_peak_position_trends(r"C:\path\to\export", x="temperature", frame_index=[0, 2, 4])
+```
+
+FWHM plots use `fwhm_err` as error bars when available. Peak-position plots use `peak_center_err` as error bars when available. Both helpers write timestamped summary CSV and PNG files under `sin2psi_export`.

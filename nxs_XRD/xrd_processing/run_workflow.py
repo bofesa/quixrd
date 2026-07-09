@@ -291,7 +291,7 @@ def generate_correction_curve(
 
 
 def plot_fwhm_summary(x="scan_number", frame_index=None, chi=None, scans=_DEFAULT, show=False):
-    """Plot FWHM for a selected frame index or exact chi against scan metadata."""
+    """Plot FWHM for selected frame index/indices or chi value(s) against scan metadata."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     scans = _resolve_scans(scans)
     result = proc.plot_fwhm_trends(
@@ -308,10 +308,31 @@ def plot_fwhm_summary(x="scan_number", frame_index=None, chi=None, scans=_DEFAUL
     return result
 
 
+def plot_peak_position_summary(x="scan_number", frame_index=None, chi=None, scans=_DEFAULT, show=False):
+    """Plot peak position for selected frame index/indices or chi value(s) against scan metadata."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    scans = _resolve_scans(scans)
+    result = proc.plot_peak_position_trends(
+        DATA_DIR,
+        x=x,
+        scans=scans,
+        frame_index=frame_index,
+        chi=chi,
+        save=True,
+        show=show,
+    )
+    print(f"Wrote: {result['summary_path']}")
+    print(f"Wrote: {result['plot_path']}")
+    return result
+
+
 if __name__ == "__main__":
     # sin2psi_scans_fit(SCANS, peak_center=PEAK_CENTER, track_peak=TRACK_PEAK, track_window=TRACK_WINDOW, fallback_to_auto=FALLBACK_TO_AUTO)
     plot_gradient_summary(x="temperature", scans=SCANS, show=False)
-    # plot_fwhm_summary(x="temperature", frame_index=7, scans=SCANS)
+    # plot_fwhm_summary(x="temperature", chi=[0.0, 5.0], scans=SCANS)
+    # plot_fwhm_summary(x="temperature", frame_index=[0, 1, 2], scans=SCANS)
+    # plot_peak_position_summary(x="temperature", chi=[0.0, 5.0], scans=SCANS)
+    # plot_peak_position_summary(x="temperature", frame_index=[0, 1, 2], scans=SCANS)
     
     # # Calibration scans. [scan_number, reference_two_theta, peak_hkl]
     # calib_params = [[202, 58.93, (1, 3, 1)], [203, 46.53, (2, 2, 0)], [204, 34.11, (1, 1, 1)],      # Correct z

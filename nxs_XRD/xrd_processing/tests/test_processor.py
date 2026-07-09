@@ -268,6 +268,47 @@ class ProcessorSmokeTest(unittest.TestCase):
             third = proc.plot_sin2psi_gradients(tmp, x="temperature", show=False)
             self.assertNotEqual(first["summary_path"], third["summary_path"])
 
+    def test_plot_sin2psi_gradients_reuses_matching_older_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export_root = Path(tmp) / "sin2psi_export"
+            for scan, slope, temp in [(101, 1.0, 300.0), (102, 2.0, 310.0)]:
+                scan_dir = export_root / f"scan_{scan}"
+                scan_dir.mkdir(parents=True)
+                (scan_dir / "sin2psi_fit_params.json").write_text(
+                    json.dumps(
+                        {
+                            "slope": slope,
+                            "slope_err": 0.1,
+                            "intercept": 4.0,
+                            "intercept_err": 0.4,
+                            "metadata": {"temperature": temp},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            all_scans = proc.plot_sin2psi_gradients(tmp, x="temperature", show=False)
+            subset = proc.plot_sin2psi_gradients(tmp, x="temperature", scans=[101], show=False)
+            repeated_all_scans = proc.plot_sin2psi_gradients(tmp, x="temperature", show=False)
+
+            self.assertNotEqual(all_scans["summary_path"], subset["summary_path"])
+            self.assertEqual(all_scans["summary_path"], repeated_all_scans["summary_path"])
+
+    def test_scan_title_uses_plotted_scans_when_selection_is_empty(self):
+        self.assertEqual(proc._scan_title(None, [101, 102, 103]), "scans 101-103")
+        self.assertEqual(proc._scan_title(None, [101, 103]), "scans 101, 103")
+
+    def test_point_limited_y_axis_ignores_large_errorbars(self):
+        fig, ax = proc.plt.subplots()
+        try:
+            ax.errorbar([1, 2], [10, 11], yerr=[1000, 1000], fmt=".-")
+            proc._set_ylim_from_points(ax, [10, 11])
+            ymin, ymax = ax.get_ylim()
+            self.assertGreater(ymin, 0)
+            self.assertLess(ymax, 20)
+        finally:
+            proc.plt.close(fig)
+
     def test_processing_params_round_trip_and_workflow_override_log(self):
         with tempfile.TemporaryDirectory() as tmp:
             params_path = Path(tmp) / "params.json"
@@ -320,19 +361,23 @@ class ProcessorSmokeTest(unittest.TestCase):
                             "metadata_json": json.dumps({"operator": "test"}),
                             "fwhm": 0.2 + scan / 1000.0,
                             "fwhm_err": 0.01,
+                            "peak_center": 20.0 + scan / 1000.0,
+                            "peak_center_err": 0.001,
                             "fit_success": True,
                         },
                         {
                             "frame_index": 1,
                             "filename": f"I_vs_2th_{scan}_chi_1.txt",
                             "scan_type": "ascan_chi",
-                            "chi": 5.0,
+                            "chi": 5.05 if scan == 102 else 5.0,
                             "psi_deg": 85.0,
                             "sin2psi": 0.99,
                             "temperature": temp,
                             "energy": 12.0,
                             "fwhm": 0.3 + scan / 1000.0,
                             "fwhm_err": 0.02,
+                            "peak_center": 20.2 + scan / 1000.0,
+                            "peak_center_err": 0.002,
                             "fit_success": True,
                         },
                     ]
@@ -342,12 +387,38 @@ class ProcessorSmokeTest(unittest.TestCase):
             by_chi = proc.collect_fwhm_summaries(tmp, chi=5.0)
             self.assertEqual(len(by_frame), 2)
             self.assertEqual(len(by_chi), 2)
-            self.assertTrue((by_chi["chi"] == 5.0).all())
+            self.assertTrue(((by_chi["chi"] - 5.0).abs() <= 0.1).all())
+
+            by_chi_multi = proc.collect_fwhm_summaries(tmp, chi=[0.0, 5.0])
+            self.assertEqual(len(by_chi_multi), 4)
+            self.assertEqual(set(by_chi_multi["selector"]), {"chi_0_0", "chi_5_0"})
+
+            by_frame_multi = proc.collect_fwhm_summaries(tmp, frame_index=[0, 1])
+            self.assertEqual(len(by_frame_multi), 4)
+            self.assertEqual(set(by_frame_multi["selector"]), {"frame_0", "frame_1"})
 
             result = proc.plot_fwhm_trends(tmp, x="temperature", chi=5.0, show=False)
             self.assertTrue(Path(result["plot_path"]).exists())
             self.assertTrue(Path(result["summary_path"]).exists())
             self.assertIn("temperature", Path(result["plot_path"]).name)
+
+            multi_result = proc.plot_fwhm_trends(tmp, x="scan_number", chi=[0.0, 5.0], show=False)
+            self.assertTrue(Path(multi_result["plot_path"]).exists())
+            self.assertIn("multi", Path(multi_result["plot_path"]).name)
+
+            multi_frame_result = proc.plot_fwhm_trends(tmp, x="scan_number", frame_index=[0, 1], show=False)
+            self.assertTrue(Path(multi_frame_result["plot_path"]).exists())
+            self.assertIn("multi", Path(multi_frame_result["plot_path"]).name)
+
+            peak_summary = proc.collect_peak_position_summaries(tmp, chi=[0.0, 5.0])
+            self.assertEqual(len(peak_summary), 4)
+            peak_result = proc.plot_peak_position_trends(tmp, x="temperature", chi=[0.0, 5.0], show=False)
+            self.assertTrue(Path(peak_result["plot_path"]).exists())
+            self.assertIn("peak_position", Path(peak_result["plot_path"]).name)
+
+            peak_frame_result = proc.plot_peak_position_trends(tmp, x="temperature", frame_index=[0, 1], show=False)
+            self.assertTrue(Path(peak_frame_result["plot_path"]).exists())
+            self.assertIn("peak_position", Path(peak_frame_result["plot_path"]).name)
 
     def test_refit_sin2psi_from_csv_applies_range_exclusions_without_peak_refit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -536,9 +607,94 @@ class ProcessorSmokeTest(unittest.TestCase):
             root.withdraw()
             tabs = [app.notebook.tab(tab_id, "text") for tab_id in app.notebook.tabs()]
             self.assertEqual(tabs, gui_app.TAB_NAMES)
+            self.assertNotIn("Help", tabs)
+            self.assertTrue(hasattr(app, "menu_bar"))
+            self.assertTrue(hasattr(app, "file_menu"))
+            self.assertTrue(hasattr(app, "help_menu"))
             self.assertTrue(hasattr(app, "log_text"))
             self.assertTrue(hasattr(app, "status_bar"))
-            app.placeholder("Smoke Test")
+            for section_name in [
+                "sin2psi.inputs",
+                "sin2psi.peak_options",
+                "sin2psi.exclusions",
+                "sin2psi.calibration",
+            ]:
+                self.assertIn(section_name, app.sections)
+            help_titles = [title for title, _text in app._help_sections()]
+            self.assertEqual(
+                help_titles,
+                ["Overview", "File", "Extraction", "Plotting", "Sorting", gui_app.SIN2PSI_LABEL],
+            )
+
+            with tempfile.TemporaryDirectory() as tmp:
+                params_path = Path(tmp) / "gui_params.json"
+                app.variables["plot.x"].set("temperature")
+                app.variables["extract.scans"].set("440-450")
+                app.export_parameters(params_path, scope="all")
+                app.variables["plot.x"].set("scan_number")
+                app.import_parameters(params_path, scope="all")
+                self.assertEqual(app.variables["plot.x"].get(), "temperature")
+
+                app.notebook.select(app.tab_frames["Plotting"])
+                current_path = Path(tmp) / "plot_params.json"
+                app.export_parameters(current_path, scope="current")
+                payload = json.loads(current_path.read_text(encoding="utf-8"))
+                self.assertIn("plot.x", payload["parameters"])
+                self.assertNotIn("extract.scans", payload["parameters"])
+
+                settings_path = Path(tmp) / "gui_settings.json"
+                cache_dir = Path(tmp) / "fast_cache"
+                app.settings_path = settings_path
+                app.settings = {}
+                app.set_cache_root(cache_dir)
+                self.assertEqual(app._cache_root(), cache_dir)
+                saved_settings = json.loads(settings_path.read_text(encoding="utf-8"))
+                self.assertEqual(Path(saved_settings["cache_root"]), cache_dir)
+
+            app.variables["sin2psi.action"].set("process")
+            app._update_sin2psi_mode()
+            self.assertTrue(app.sections["sin2psi.peak_options"].grid_info())
+            self.assertTrue(app.sections["sin2psi.exclusions"].grid_info())
+            self.assertFalse(app.sections["sin2psi.calibration"].grid_info())
+
+            app.variables["sin2psi.action"].set("refit")
+            app._update_sin2psi_mode()
+            self.assertFalse(app.sections["sin2psi.peak_options"].grid_info())
+            self.assertTrue(app.sections["sin2psi.exclusions"].grid_info())
+            self.assertFalse(app.sections["sin2psi.calibration"].grid_info())
+
+            app.variables["sin2psi.action"].set("correction")
+            app.variables["sin2psi.correction_method"].set("polynomial")
+            app._update_sin2psi_mode()
+            self.assertFalse(app.sections["sin2psi.peak_options"].grid_info())
+            self.assertTrue(app.sections["sin2psi.exclusions"].grid_info())
+            self.assertTrue(app.sections["sin2psi.calibration"].grid_info())
+            self.assertTrue(app.widgets["sin2psi.correction_degree"][0].grid_info())
+
+            app.variables["sin2psi.correction_method"].set("gaussian_process")
+            app._update_sin2psi_mode()
+            self.assertFalse(app.widgets["sin2psi.correction_degree"][0].grid_info())
+
+            with mock.patch.object(gui_app.proc, "generate_sin2psi_correction", return_value={"path": "correction.json", "plot_path": "correction.png"}) as generated:
+                captured = {}
+
+                def immediate_run(title, func, on_success=None, run_on_main=False):
+                    captured["result"] = func()
+                    if on_success:
+                        on_success(captured["result"])
+
+                app._run_task = immediate_run
+                app.variables["sin2psi.action"].set("correction")
+                app.variables["sin2psi.correction_method"].set("polynomial")
+                app.variables["sin2psi.correction_degree"].set("3")
+                app.variables["sin2psi.data_dir"].set(str(self.repo_root))
+                app.variables["sin2psi.scans"].set("101")
+                app.variables["sin2psi.reference_folder"].set(str(self.repo_root))
+                app.variables["sin2psi.reference_scan"].set("101")
+                app.run_sin2psi_action()
+                self.assertEqual(generated.call_args.kwargs["degree"], 3)
+
+            app.log("Smoke Test")
             self.assertIn("Smoke Test", app.status_var.get())
         finally:
             root.destroy()

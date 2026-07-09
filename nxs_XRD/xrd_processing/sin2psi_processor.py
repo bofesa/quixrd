@@ -1,3 +1,11 @@
+"""Sin2psi processing helpers.
+
+The sin2psi analysis workflow in this module is based on the approach from
+materialsguy/Bessy-II-KMC-II-insitu-sin2psi:
+https://github.com/materialsguy/Bessy-II-KMC-II-insitu-sin2psi
+Archive DOI: https://doi.org/10.5281/zenodo.17349576
+"""
+
 from __future__ import annotations
 
 import json
@@ -11,7 +19,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib
 
-matplotlib.use("Agg", force=True)
+if not os.environ.get("NXS_XRD_GUI_INTERACTIVE"):
+    matplotlib.use("Agg", force=True)
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -961,12 +970,12 @@ def generate_sin2psi_correction(
             used["sin2psi"],
             correction_target,
             yerr=plot_yerr.to_numpy(dtype=float),
-            fmt="x",
+            fmt=".",
             capsize=3,
             label="reference points",
         )
     else:
-        ax.plot(used["sin2psi"], correction_target, "x", label="reference points")
+        ax.plot(used["sin2psi"], correction_target, ".", label="reference points")
     excluded = df.loc[exclusion_mask].dropna(subset=["sin2psi", "peak_center"])
     if not excluded.empty:
         excluded_targets = excluded["peak_center"].to_numpy(dtype=float)
@@ -997,6 +1006,10 @@ def generate_sin2psi_correction(
     ax.set_xlabel("sin2psi")
     ax.set_ylabel("2theta offset from reference" if reference_two_theta_provided else "2theta")
     ax.set_title(f"Correction scan {int(scan_number)} - {method.replace('_', ' ')}")
+    ylim_values = list(correction_target)
+    if not excluded.empty:
+        ylim_values.extend(excluded_targets)
+    _set_ylim_from_points(ax, ylim_values)
     ax.legend()
     fig.tight_layout()
     fig.savefig(plot_path, dpi=150)
@@ -1087,11 +1100,11 @@ def _save_sin2psi_outputs(df, summary, scan_dir):
         ax.plot(
             df["sin2psi"],
             df["peak_center_uncorrected"],
-            "x",
+            ".",
             alpha=0.2,
             label="uncorrected",
         )
-    ax.plot(used["sin2psi"], used[y_column], "x", label="used")
+    ax.plot(used["sin2psi"], used[y_column], ".", label="used")
     if not excluded.empty:
         ax.plot(excluded["sin2psi"], excluded[y_column], ".", label="excluded")
 
@@ -1104,6 +1117,12 @@ def _save_sin2psi_outputs(df, summary, scan_dir):
     if summary.get("correction_applied"):
         title += " (corrected)"
     ax.set_title(title)
+    ylim_values = list(used[y_column])
+    if not excluded.empty:
+        ylim_values.extend(excluded[y_column])
+    if summary.get("correction_applied") and "peak_center_uncorrected" in df.columns:
+        ylim_values.extend(df["peak_center_uncorrected"].dropna())
+    _set_ylim_from_points(ax, ylim_values)
     ax.legend()
     fig.tight_layout()
     fig.savefig(plot_path, dpi=150)
@@ -1250,15 +1269,29 @@ def _safe_plot_suffix(value):
     return suffix or "x"
 
 
-def _scan_title(scans):
-    if scans is None:
-        return "all scans"
+def _compact_scan_title(scans):
     scans = [scans] if isinstance(scans, int) else list(scans)
     if not scans:
         return "no scans"
     if len(scans) == 1:
         return f"scan {int(scans[0])}"
-    return f"scans {int(min(scans))}-{int(max(scans))}"
+    sorted_scans = sorted({int(scan) for scan in scans})
+    if sorted_scans == list(range(sorted_scans[0], sorted_scans[-1] + 1)):
+        return f"scans {sorted_scans[0]}-{sorted_scans[-1]}"
+    if len(sorted_scans) <= 8:
+        return "scans " + ", ".join(str(scan) for scan in sorted_scans)
+    return f"scans {sorted_scans[0]}-{sorted_scans[-1]}"
+
+
+def _scan_title(scans, plotted_scans=None):
+    if scans is None:
+        if plotted_scans is None:
+            return "all scans"
+        values = pd.to_numeric(pd.Series(plotted_scans), errors="coerce").dropna()
+        if values.empty:
+            return "all scans"
+        return _compact_scan_title(values.astype(int).tolist())
+    return _compact_scan_title(scans)
 
 
 def _selector_title(selector):
@@ -1266,7 +1299,7 @@ def _selector_title(selector):
     if text.startswith("frame_"):
         return f"frame {text.split('_', 1)[1]}"
     if text.startswith("chi_"):
-        return f"chi={text.split('_', 1)[1].replace('_', '.')}"
+        return f"chi={text.split('_', 1)[1].replace('_', '.')} \u00b1 0.1\u00b0"
     return text.replace("_", " ")
 
 
@@ -1290,6 +1323,11 @@ def _latest_matching_file(root, pattern):
     if not files:
         return None
     return max(files, key=lambda path: (path.stat().st_mtime, path.name))
+
+
+def _matching_files_newest_first(root, pattern):
+    files = [path for path in Path(root).glob(pattern) if path.is_file()]
+    return sorted(files, key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
 
 
 def _normalised_compare_df(df):
@@ -1319,13 +1357,12 @@ def _dataframes_match(left, right):
 def _write_or_reuse_summary(df, export_root, filename_template):
     export_root = Path(export_root)
     export_root.mkdir(parents=True, exist_ok=True)
-    latest = _latest_matching_file(export_root, filename_template.format(timestamp="*"))
-    if latest is not None:
+    for existing in _matching_files_newest_first(export_root, filename_template.format(timestamp="*")):
         try:
-            if _dataframes_match(df, pd.read_csv(latest)):
-                return latest
+            if _dataframes_match(df, pd.read_csv(existing)):
+                return existing
         except Exception as exc:
-            logger.warning("Could not compare existing summary %s: %s", latest, exc)
+            logger.warning("Could not compare existing summary %s: %s", existing, exc)
     output_path = _unique_path(export_root / filename_template.format(timestamp=_output_timestamp()))
     df.to_csv(output_path, index=False)
     return output_path
@@ -1374,6 +1411,20 @@ def _prepare_plot_frame(df, x, y):
     return plot_df, x_values, x_label
 
 
+def _set_ylim_from_points(ax, values, pad_fraction=0.08):
+    y_values = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=float)
+    y_values = y_values[np.isfinite(y_values)]
+    if y_values.size == 0:
+        return
+    ymin = float(np.min(y_values))
+    ymax = float(np.max(y_values))
+    if ymin == ymax:
+        pad = max(abs(ymin) * pad_fraction, 1.0)
+    else:
+        pad = (ymax - ymin) * pad_fraction
+    ax.set_ylim(ymin - pad, ymax + pad)
+
+
 def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, show=False):
     """
     Plot sin2psi gradient (slope) vs a specified x-axis variable (default: scan_number).
@@ -1398,14 +1449,18 @@ def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, sho
         x_values,
         pd.to_numeric(plot_df["slope"], errors="coerce"),
         yerr=yerr,
-        fmt="o-",
+        fmt=".-",
         capsize=3,
         linewidth=0.8,
         markersize=4,
     )
+    _set_ylim_from_points(ax, plot_df["slope"])
     ax.set_xlabel(str(x_label).replace("_", " "))
     ax.set_ylabel("sin2psi gradient (slope)")
-    ax.set_title(f"sin2psi gradient vs {str(x_label).replace('_', ' ')} - {_scan_title(scans)}")
+    ax.set_title(
+        f"sin2psi gradient vs {str(x_label).replace('_', ' ')} - "
+        f"{_scan_title(scans, plot_df.get('scan_number'))}"
+    )
     ax.grid(True, linewidth=0.3)
     fig.autofmt_xdate()
     fig.tight_layout()
@@ -1435,24 +1490,85 @@ def _scan_fit_csv_path(scan_dir, scan_number):
     return Path(scan_dir) / f"scan_{scan_number}_fits.csv"
 
 
-def _selected_fwhm_row(df, scan_number, frame_index=None, chi=None):
+def _selector_values(value):
+    if isinstance(value, (str, bytes)):
+        return [item.strip() for item in str(value).split(",") if item.strip()]
+    if isinstance(value, Sequence):
+        return list(value)
+    return [value]
+
+
+def _selected_fit_rows(df, scan_number, frame_index=None, chi=None, label="fit"):
     if (frame_index is None) == (chi is None):
         raise ValueError("Specify exactly one of frame_index or chi")
+    matches = []
     if frame_index is not None:
-        selected = df.loc[pd.to_numeric(df["frame_index"], errors="coerce") == int(frame_index)]
-        selector = f"frame_{int(frame_index)}"
+        frame_values = pd.to_numeric(df["frame_index"], errors="coerce")
+        for frame_value in _selector_values(frame_index):
+            selected = df.loc[frame_values == int(frame_value)]
+            selector = f"frame_{int(frame_value)}"
+            if selected.empty:
+                logger.warning("No %s row matched %s for scan %s", label, selector, scan_number)
+                continue
+            matches.append((selected.sort_values("frame_index").iloc[0], selector))
     else:
-        selected = df.loc[pd.to_numeric(df["chi"], errors="coerce") == float(chi)]
-        selector = f"chi_{_safe_plot_suffix(chi)}"
-    if selected.empty:
-        logger.warning("No FWHM row matched %s for scan %s", selector, scan_number)
+        chi_values = pd.to_numeric(df["chi"], errors="coerce")
+        for chi_value in _selector_values(chi):
+            selected = df.loc[(chi_values - float(chi_value)).abs() <= 0.1]
+            selector = f"chi_{_safe_plot_suffix(chi_value)}"
+            if selected.empty:
+                logger.warning("No %s row matched %s for scan %s", label, selector, scan_number)
+                continue
+            matches.append((selected.sort_values("frame_index").iloc[0], selector))
+    return matches
+
+
+def _selected_fwhm_row(df, scan_number, frame_index=None, chi=None):
+    matches = _selected_fit_rows(df, scan_number, frame_index=frame_index, chi=chi, label="FWHM")
+    if not matches:
+        selector = (
+            f"frame_{_safe_plot_suffix(frame_index)}"
+            if frame_index is not None
+            else f"chi_{_safe_plot_suffix(chi)}"
+        )
         return None, selector
-    return selected.sort_values("frame_index").iloc[0], selector
+    return matches[0]
 
 
 def collect_fwhm_summaries(data_dir, scans=None, frame_index=None, chi=None):
+    return collect_fit_value_summaries(
+        data_dir,
+        scans=scans,
+        frame_index=frame_index,
+        chi=chi,
+        value_column="fwhm",
+        error_column="fwhm_err",
+        label="FWHM",
+    )
+
+
+def collect_peak_position_summaries(data_dir, scans=None, frame_index=None, chi=None):
+    return collect_fit_value_summaries(
+        data_dir,
+        scans=scans,
+        frame_index=frame_index,
+        chi=chi,
+        value_column="peak_center",
+        error_column="peak_center_err",
+        label="peak position",
+    )
+
+
+def collect_fit_value_summaries(
+    data_dir,
+    scans=None,
+    frame_index=None,
+    chi=None,
+    value_column="fwhm",
+    error_column=None,
+    label="fit",
+):
     rows = []
-    selector = None
     for scan_dir in _summary_dirs(data_dir, scans=scans):
         scan_number = _scan_number_from_dir(scan_dir)
         if scan_number is None:
@@ -1466,67 +1582,93 @@ def collect_fwhm_summaries(data_dir, scans=None, frame_index=None, chi=None):
         except Exception as exc:
             logger.warning("Could not read %s: %s", csv_path, exc)
             continue
-        row, selector = _selected_fwhm_row(df, scan_number, frame_index=frame_index, chi=chi)
-        if row is None:
+        if value_column not in df.columns:
+            logger.warning("Missing %s column for scan %s: %s", value_column, scan_number, csv_path)
             continue
-        out = {"scan_number": scan_number, "selector": selector}
-        for key in [
-            "frame_index",
-            "filename",
-            "scan_type",
-            "chi",
-            "psi_deg",
-            "sin2psi",
-            "temperature",
-            "energy",
-            "start_time",
-            "frame_time",
-            "fwhm",
-            "fwhm_err",
-            "fit_success",
-        ]:
-            if key in df.columns:
-                out[key] = row.get(key)
-        if "metadata_json" in df.columns and pd.notna(row.get("metadata_json")):
-            try:
-                extra = json.loads(row.get("metadata_json"))
-                if isinstance(extra, dict):
-                    out.update(extra)
-            except Exception:
-                logger.warning("Could not parse metadata_json for FWHM summary")
-        rows.append(_json_safe(out))
+        for row, selector in _selected_fit_rows(df, scan_number, frame_index=frame_index, chi=chi, label=label):
+            out = {"scan_number": scan_number, "selector": selector, "trend_value": row.get(value_column)}
+            if error_column and error_column in df.columns:
+                out["trend_err"] = row.get(error_column)
+            for key in [
+                "frame_index",
+                "filename",
+                "scan_type",
+                "chi",
+                "psi_deg",
+                "sin2psi",
+                "temperature",
+                "energy",
+                "start_time",
+                "frame_time",
+                "fwhm",
+                "fwhm_err",
+                "peak_center",
+                "peak_center_err",
+                "fit_success",
+            ]:
+                if key in df.columns:
+                    out[key] = row.get(key)
+            if "metadata_json" in df.columns and pd.notna(row.get("metadata_json")):
+                try:
+                    extra = json.loads(row.get("metadata_json"))
+                    if isinstance(extra, dict):
+                        out.update(extra)
+                except Exception:
+                    logger.warning("Could not parse metadata_json for %s summary", label)
+            rows.append(_json_safe(out))
 
     result = pd.DataFrame(rows)
     if not result.empty:
-        result = result.sort_values("scan_number").reset_index(drop=True)
+        result = result.sort_values(["selector", "scan_number"]).reset_index(drop=True)
     return result
 
 
-def plot_fwhm_trends(data_dir, x="scan_number", scans=None, frame_index=None, chi=None, save=True, show=False):
-    df = collect_fwhm_summaries(data_dir, scans=scans, frame_index=frame_index, chi=chi)
-    plot_df, x_values, x_label = _prepare_plot_frame(df, x, "fwhm")
-
-    yerr = None
-    if "fwhm_err" in plot_df.columns:
-        fwhm_err = pd.to_numeric(plot_df["fwhm_err"], errors="coerce")
-        if fwhm_err.notna().any():
-            yerr = fwhm_err.to_numpy(dtype=float)
-
+def _plot_fit_value_trends(
+    df,
+    data_dir,
+    x,
+    y_column,
+    yerr_column,
+    ylabel,
+    title_label,
+    file_prefix,
+    scans=None,
+    save=True,
+    show=False,
+):
+    plot_df, _x_values, x_label = _prepare_plot_frame(df, x, y_column)
     fig, ax = plt.subplots(figsize=(7, 4.5))
-    ax.errorbar(
-        x_values,
-        pd.to_numeric(plot_df["fwhm"], errors="coerce"),
-        yerr=yerr,
-        fmt="o-",
-        capsize=3,
-        linewidth=0.8,
-        markersize=4,
-    )
+    selectors = list(plot_df["selector"].dropna().unique()) if "selector" in plot_df.columns else ["selected"]
+    for selector in selectors:
+        series = plot_df.loc[plot_df["selector"] == selector].copy() if "selector" in plot_df.columns else plot_df
+        series, x_values, _series_x_label = _prepare_plot_frame(series, x, y_column)
+        yerr = None
+        if yerr_column and yerr_column in series.columns:
+            err_values = pd.to_numeric(series[yerr_column], errors="coerce")
+            if err_values.notna().any():
+                yerr = err_values.to_numpy(dtype=float)
+        ax.errorbar(
+            x_values,
+            pd.to_numeric(series[y_column], errors="coerce"),
+            yerr=yerr,
+            fmt=".-",
+            capsize=3,
+            linewidth=0.8,
+            markersize=4,
+            label=_selector_title(selector),
+        )
+    _set_ylim_from_points(ax, plot_df[y_column])
     ax.set_xlabel(str(x_label).replace("_", " "))
-    ax.set_ylabel("FWHM")
-    selector = str(df["selector"].iloc[0]) if "selector" in df.columns and not df.empty else "selected"
-    ax.set_title(f"FWHM {_selector_title(selector)} vs {str(x_label).replace('_', ' ')} - {_scan_title(scans)}")
+    ax.set_ylabel(ylabel)
+    selector = "multi" if len(selectors) > 1 else str(selectors[0])
+    selector_title = "multiple chi values" if selector == "multi" else _selector_title(selector)
+    ax.set_title(
+        f"{title_label} {selector_title} vs {str(x_label).replace('_', ' ')} - "
+        f"{_scan_title(scans, plot_df.get('scan_number'))}"
+    )
     ax.grid(True, linewidth=0.3)
+    if len(selectors) > 1:
+        ax.legend(title="Selection")
     fig.autofmt_xdate()
     fig.tight_layout()
 
@@ -1538,8 +1680,8 @@ def plot_fwhm_trends(data_dir, x="scan_number", scans=None, frame_index=None, ch
         stamp = _output_timestamp()
         selector_suffix = _safe_plot_suffix(selector)
         x_suffix = _safe_plot_suffix(x)
-        summary_path = _unique_path(export_root / f"sin2psi_fwhm_summary_{stamp}.csv")
-        output_path = _unique_path(export_root / f"sin2psi_fwhm_vs_{x_suffix}_{selector_suffix}_{stamp}.png")
+        summary_path = _unique_path(export_root / f"sin2psi_{file_prefix}_summary_{stamp}.csv")
+        output_path = _unique_path(export_root / f"sin2psi_{file_prefix}_vs_{x_suffix}_{selector_suffix}_{stamp}.png")
         df.to_csv(summary_path, index=False)
         fig.savefig(output_path, dpi=150)
     if show:
@@ -1551,6 +1693,40 @@ def plot_fwhm_trends(data_dir, x="scan_number", scans=None, frame_index=None, ch
         "summary_path": str(summary_path) if summary_path else None,
         "plot_path": str(output_path) if output_path else None,
     }
+
+
+def plot_fwhm_trends(data_dir, x="scan_number", scans=None, frame_index=None, chi=None, save=True, show=False):
+    df = collect_fwhm_summaries(data_dir, scans=scans, frame_index=frame_index, chi=chi)
+    return _plot_fit_value_trends(
+        df,
+        data_dir,
+        x,
+        y_column="fwhm",
+        yerr_column="fwhm_err",
+        ylabel="FWHM",
+        title_label="FWHM",
+        file_prefix="fwhm",
+        scans=scans,
+        save=save,
+        show=show,
+    )
+
+
+def plot_peak_position_trends(data_dir, x="scan_number", scans=None, frame_index=None, chi=None, save=True, show=False):
+    df = collect_peak_position_summaries(data_dir, scans=scans, frame_index=frame_index, chi=chi)
+    return _plot_fit_value_trends(
+        df,
+        data_dir,
+        x,
+        y_column="peak_center",
+        yerr_column="peak_center_err",
+        ylabel="Peak position (2theta)",
+        title_label="Peak position",
+        file_prefix="peak_position",
+        scans=scans,
+        save=save,
+        show=show,
+    )
 
 
 def process_scan(
