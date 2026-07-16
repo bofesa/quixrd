@@ -35,6 +35,8 @@ except Exception:  # pragma: no cover - optional dependency
 
 logger = logging.getLogger(__name__)
 
+ENERGY_TO_WAVELENGTH_KEV_A = 12.3984193
+
 
 def gauss_func(x, max_intensity, two_theta, fwhm):
     return max_intensity * np.exp(-np.log(2) * ((x - two_theta) / (fwhm / 2)) ** 2)
@@ -420,6 +422,24 @@ def discover_scan_files(data_dir, scan_number):
     return [p for _, p in sorted(matched, key=lambda item: (item[0], item[1]))]
 
 
+def discover_scan_numbers(data_dir, include_raw=True, include_processed=True):
+    """Return available scan numbers from exported TXT files and/or processed scan folders."""
+    data_path = Path(data_dir)
+    scan_numbers = set()
+    if include_raw:
+        for path in sorted(data_path.glob("I_vs_2th_*.txt")):
+            scan_number = _extract_scan_number(_scan_name_parts(path.name))
+            if scan_number is not None:
+                scan_numbers.add(scan_number)
+    if include_processed:
+        export_root = data_path / "sin2psi_export"
+        for scan_dir in sorted(export_root.glob("scan_*")):
+            scan_number = _scan_number_from_dir(scan_dir)
+            if scan_number is not None:
+                scan_numbers.add(scan_number)
+    return sorted(scan_numbers)
+
+
 def _frame_csv_columns():
     return [
         "frame_index",
@@ -691,6 +711,155 @@ def _fit_sin2psi_regression(used, y_column="peak_center"):
         "weights_used": weights_used,
         "residuals": np.asarray(resid, dtype=float).tolist(),
     }, np.asarray(resid, dtype=float)
+
+
+def _energy_to_wavelength(energy):
+    if energy in (None, ""):
+        return None
+    energy = float(energy)
+    if energy <= 0:
+        raise ValueError("Energy must be positive")
+    if energy > 1000:
+        energy = energy / 1000.0
+    return ENERGY_TO_WAVELENGTH_KEV_A / energy
+
+
+def _resolve_wavelength(wavelength=None, energy=None, df=None):
+    if wavelength not in (None, ""):
+        return float(wavelength)
+    if energy not in (None, ""):
+        return _energy_to_wavelength(energy)
+    if df is not None and "energy" in df.columns:
+        values = pd.to_numeric(df["energy"], errors="coerce").dropna()
+        if not values.empty:
+            return _energy_to_wavelength(float(values.iloc[0]))
+    raise ValueError("Stress calculation requires wavelength, energy, or energy metadata")
+
+
+def _two_theta_to_d(two_theta, wavelength):
+    theta = np.radians(pd.to_numeric(two_theta, errors="coerce") / 2.0)
+    return float(wavelength) / (2.0 * np.sin(theta))
+
+
+def _reference_d0(reference_d0=None, reference_two_theta=None, wavelength=None):
+    if reference_d0 not in (None, ""):
+        return float(reference_d0), None
+    if reference_two_theta not in (None, ""):
+        d0 = _two_theta_to_d(float(reference_two_theta), wavelength)
+        return float(d0), float(reference_two_theta)
+    return None, None
+
+
+def _weighted_line_fit(x, y, yerr=None):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if yerr is None:
+        w = np.ones_like(x)
+    else:
+        yerr = np.asarray(yerr, dtype=float)
+        if np.all(np.isfinite(yerr)) and np.any(yerr > 0):
+            w = 1.0 / np.square(np.where(yerr > 0, yerr, np.nanmedian(yerr[yerr > 0])))
+        else:
+            w = np.ones_like(x)
+    design = np.vstack([x, np.ones_like(x)]).T
+    wmat = np.diag(w)
+    beta = np.linalg.inv(design.T @ wmat @ design) @ (design.T @ wmat @ y)
+    resid = y - (beta[0] * x + beta[1])
+    dof = max(len(x) - 2, 1)
+    s2 = float(np.sum(w * resid**2) / dof)
+    cov = np.linalg.inv(design.T @ wmat @ design) * s2
+    return float(beta[0]), float(beta[1]), cov, resid
+
+
+def calculate_sin2psi_stress(
+    df,
+    y_column="peak_center",
+    elastic_E=None,
+    elastic_nu=None,
+    elastic_E_units=None,
+    reference_two_theta=None,
+    reference_d0=None,
+    wavelength=None,
+    energy=None,
+):
+    if elastic_E in (None, "") or elastic_nu in (None, ""):
+        return None
+    elastic_E = float(elastic_E)
+    elastic_nu = float(elastic_nu)
+    stress_units = str(elastic_E_units).strip() if elastic_E_units not in (None, "") else "same_as_E"
+    used = df.loc[~df["excluded_from_sin2psi"]].dropna(subset=[y_column, "sin2psi"]).copy()
+    if len(used) < 3:
+        raise RuntimeError("Need at least three usable points for stress calculation")
+    wavelength = _resolve_wavelength(wavelength=wavelength, energy=energy, df=used)
+    d_values = _two_theta_to_d(used[y_column], wavelength)
+    twotheta_err = pd.to_numeric(used.get("peak_center_err"), errors="coerce")
+    d_err = None
+    if twotheta_err.notna().all():
+        theta = np.radians(pd.to_numeric(used[y_column], errors="coerce") / 2.0)
+        twotheta_err_rad = np.radians(twotheta_err.to_numpy(dtype=float))
+        d_err = np.abs(-0.5 * d_values / np.tan(theta) * twotheta_err_rad)
+
+    d0, resolved_two_theta = _reference_d0(
+        reference_d0=reference_d0,
+        reference_two_theta=reference_two_theta,
+        wavelength=wavelength,
+    )
+    x = used["sin2psi"].to_numpy(dtype=float)
+    if d0 is not None:
+        strain = (d_values - d0) / d0
+        strain_err = None if d_err is None else d_err / d0
+        slope, intercept, cov, resid = _weighted_line_fit(x, strain, strain_err)
+        stress = elastic_E / (1.0 + elastic_nu) * slope
+        stress_err = elastic_E / (1.0 + elastic_nu) * float(np.sqrt(max(cov[0, 0], 0.0)))
+        method = "reference_d0" if reference_d0 not in (None, "") else "reference_two_theta"
+        return {
+            "stress": float(stress),
+            "stress_err": float(abs(stress_err)),
+            "stress_units": stress_units,
+            "elastic_E": elastic_E,
+            "elastic_E_units": stress_units,
+            "elastic_nu": elastic_nu,
+            "stress_method": method,
+            "stress_reference_two_theta": resolved_two_theta,
+            "stress_reference_d0": float(d0),
+            "stress_inferred_d0": None,
+            "stress_wavelength": float(wavelength),
+            "stress_slope": float(slope),
+            "stress_intercept": float(intercept),
+            "stress_residuals": np.asarray(resid, dtype=float).tolist(),
+        }
+
+    slope, intercept, cov, resid = _weighted_line_fit(x, d_values, d_err)
+    if abs(intercept) < 1e-15:
+        raise RuntimeError("Cannot infer stress from near-zero d intercept")
+    ratio = slope / intercept
+    denominator = 1.0 + elastic_nu + 2.0 * elastic_nu * ratio
+    if abs(denominator) < 1e-15:
+        raise RuntimeError("Equibiaxial stress denominator is too close to zero")
+    stress_over_E = ratio / denominator
+    stress = elastic_E * stress_over_E
+    dr_da = 1.0 / intercept
+    dr_db = -slope / (intercept * intercept)
+    ratio_var = dr_da**2 * cov[0, 0] + dr_db**2 * cov[1, 1] + 2.0 * dr_da * dr_db * cov[0, 1]
+    ratio_err = math.sqrt(max(float(ratio_var), 0.0))
+    dstress_dr = elastic_E * (1.0 + elastic_nu) / (denominator * denominator)
+    inferred_d0 = intercept / (1.0 - 2.0 * elastic_nu * stress_over_E)
+    return {
+        "stress": float(stress),
+        "stress_err": float(abs(dstress_dr) * ratio_err),
+        "stress_units": stress_units,
+        "elastic_E": elastic_E,
+        "elastic_E_units": stress_units,
+        "elastic_nu": elastic_nu,
+        "stress_method": "equibiaxial_inferred_d0",
+        "stress_reference_two_theta": None,
+        "stress_reference_d0": None,
+        "stress_inferred_d0": float(inferred_d0),
+        "stress_wavelength": float(wavelength),
+        "stress_slope": float(slope),
+        "stress_intercept": float(intercept),
+        "stress_residuals": np.asarray(resid, dtype=float).tolist(),
+    }
 
 
 def _sin2psi_exclusion_mask(
@@ -1030,6 +1199,13 @@ def perform_sin2psi_fit(
     auto_exclude_sigma=3.0,
     auto_exclude_max_iter=1,
     correction_json=None,
+    elastic_E=None,
+    elastic_nu=None,
+    elastic_E_units=None,
+    stress_reference_two_theta=None,
+    stress_reference_d0=None,
+    stress_wavelength=None,
+    stress_energy=None,
 ):
     scan_path = Path(scan_dir)
     df = df.copy()
@@ -1063,6 +1239,19 @@ def perform_sin2psi_fit(
         raise RuntimeError("No usable points for sin2psi regression")
 
     summary, resid = _fit_sin2psi_regression(used, y_column=y_column)
+    stress_summary = calculate_sin2psi_stress(
+        df,
+        y_column=y_column,
+        elastic_E=elastic_E,
+        elastic_nu=elastic_nu,
+        elastic_E_units=elastic_E_units,
+        reference_two_theta=stress_reference_two_theta,
+        reference_d0=stress_reference_d0,
+        wavelength=stress_wavelength,
+        energy=stress_energy,
+    )
+    if stress_summary is not None:
+        summary.update(stress_summary)
     summary.update(
         {
         "excluded_frames": excluded_frames,
@@ -1095,38 +1284,46 @@ def _save_sin2psi_outputs(df, summary, scan_dir):
     used = df.loc[~df["excluded_from_sin2psi"]].dropna(subset=[y_column])
     excluded = df.loc[df["excluded_from_sin2psi"]].dropna(subset=[y_column])
 
-    fig, ax = plt.subplots(figsize=(6.5, 4.5))
-    if summary.get("correction_applied") and "peak_center_uncorrected" in df.columns:
-        ax.plot(
-            df["sin2psi"],
-            df["peak_center_uncorrected"],
-            ".",
-            alpha=0.2,
-            label="uncorrected",
-        )
-    ax.plot(used["sin2psi"], used[y_column], ".", label="used")
-    if not excluded.empty:
-        ax.plot(excluded["sin2psi"], excluded[y_column], ".", label="excluded")
+    was_interactive = plt.isinteractive()
+    plt.ioff()
+    fig = None
+    try:
+        fig, ax = plt.subplots(figsize=(6.5, 4.5))
+        if summary.get("correction_applied") and "peak_center_uncorrected" in df.columns:
+            ax.plot(
+                df["sin2psi"],
+                df["peak_center_uncorrected"],
+                ".",
+                alpha=0.2,
+                label="uncorrected",
+            )
+        ax.plot(used["sin2psi"], used[y_column], ".", label="used")
+        if not excluded.empty:
+            ax.plot(excluded["sin2psi"], excluded[y_column], ".", label="excluded")
 
-    xline = np.linspace(float(df["sin2psi"].min()), float(df["sin2psi"].max()), 200)
-    yline = summary["slope"] * xline + summary["intercept"]
-    ax.plot(xline, yline, "-", label="fit", linewidth=0.5, color="black")
-    ax.set_xlabel("sin2psi")
-    ax.set_ylabel(y_column)
-    title = f"scan {scan_number} sin2psi fit" if scan_number is not None else "sin2psi fit"
-    if summary.get("correction_applied"):
-        title += " (corrected)"
-    ax.set_title(title)
-    ylim_values = list(used[y_column])
-    if not excluded.empty:
-        ylim_values.extend(excluded[y_column])
-    if summary.get("correction_applied") and "peak_center_uncorrected" in df.columns:
-        ylim_values.extend(df["peak_center_uncorrected"].dropna())
-    _set_ylim_from_points(ax, ylim_values)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(plot_path, dpi=150)
-    plt.close(fig)
+        xline = np.linspace(float(df["sin2psi"].min()), float(df["sin2psi"].max()), 200)
+        yline = summary["slope"] * xline + summary["intercept"]
+        ax.plot(xline, yline, "-", label="fit", linewidth=0.5, color="black")
+        ax.set_xlabel("sin2psi")
+        ax.set_ylabel(y_column)
+        title = f"scan {scan_number} sin2psi fit" if scan_number is not None else "sin2psi fit"
+        if summary.get("correction_applied"):
+            title += " (corrected)"
+        ax.set_title(title)
+        ylim_values = list(used[y_column])
+        if not excluded.empty:
+            ylim_values.extend(excluded[y_column])
+        if summary.get("correction_applied") and "peak_center_uncorrected" in df.columns:
+            ylim_values.extend(df["peak_center_uncorrected"].dropna())
+        _set_ylim_from_points(ax, ylim_values)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(plot_path, dpi=150)
+    finally:
+        if fig is not None:
+            plt.close(fig)
+        if was_interactive:
+            plt.ion()
 
     with open(json_path, "w", encoding="utf-8") as fh:
         json.dump(_json_safe(summary), fh, indent=2)
@@ -1142,6 +1339,13 @@ def refit_sin2psi_from_csv(
     auto_exclude_sigma=3.0,
     auto_exclude_max_iter=1,
     correction_json=None,
+    elastic_E=None,
+    elastic_nu=None,
+    elastic_E_units=None,
+    stress_reference_two_theta=None,
+    stress_reference_d0=None,
+    stress_wavelength=None,
+    stress_energy=None,
 ):
     scan_dir = Path(data_dir) / "sin2psi_export" / f"scan_{int(scan_number)}"
     csv_path = scan_dir / f"scan_{int(scan_number)}_fits.csv"
@@ -1158,6 +1362,13 @@ def refit_sin2psi_from_csv(
         auto_exclude_sigma=auto_exclude_sigma,
         auto_exclude_max_iter=auto_exclude_max_iter,
         correction_json=correction_json,
+        elastic_E=elastic_E,
+        elastic_nu=elastic_nu,
+        elastic_E_units=elastic_E_units,
+        stress_reference_two_theta=stress_reference_two_theta,
+        stress_reference_d0=stress_reference_d0,
+        stress_wavelength=stress_wavelength,
+        stress_energy=stress_energy,
     )
     df["psi_deg"] = df["chi"].apply(lambda c: 90.0 - float(c) if pd.notna(c) else np.nan)
     df["sin2psi"] = df["psi_deg"].apply(
@@ -1247,6 +1458,16 @@ def collect_sin2psi_summaries(data_dir, scans=None, save_csv=True, output_path=N
             "chi2",
             "rms",
             "n_points",
+            "stress",
+            "stress_err",
+            "stress_units",
+            "elastic_E",
+            "elastic_E_units",
+            "elastic_nu",
+            "stress_method",
+            "stress_reference_two_theta",
+            "stress_reference_d0",
+            "stress_inferred_d0",
         ]:
             row[key] = summary.get(key)
         row.update(metadata)
@@ -1256,9 +1477,7 @@ def collect_sin2psi_summaries(data_dir, scans=None, save_csv=True, output_path=N
     if not df.empty:
         df = df.sort_values("scan_number").reset_index(drop=True)
     if save_csv:
-        export_root = Path(data_dir) / "sin2psi_export"
-        export_root.mkdir(parents=True, exist_ok=True)
-        csv_path = Path(output_path) if output_path else export_root / "sin2psi_scan_summary.csv"
+        csv_path = Path(output_path) if output_path else _summary_output_dir(data_dir) / "sin2psi_scan_summary.csv"
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(csv_path, index=False)
     return df
@@ -1299,12 +1518,24 @@ def _selector_title(selector):
     if text.startswith("frame_"):
         return f"frame {text.split('_', 1)[1]}"
     if text.startswith("chi_"):
-        return f"chi={text.split('_', 1)[1].replace('_', '.')} \u00b1 0.1\u00b0"
+        return f"chi={text.split('_', 1)[1].replace('_', '.')}\u00b0"
     return text.replace("_", " ")
 
 
 def _output_timestamp():
     return pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _sin2psi_export_root(data_dir):
+    return Path(data_dir) / "sin2psi_export"
+
+
+def _summary_output_dir(data_dir):
+    return _sin2psi_export_root(data_dir) / "summaries"
+
+
+def _plot_output_dir(data_dir):
+    return _sin2psi_export_root(data_dir) / "plots"
 
 
 def _unique_path(path):
@@ -1354,16 +1585,26 @@ def _dataframes_match(left, right):
         return False
 
 
-def _write_or_reuse_summary(df, export_root, filename_template):
-    export_root = Path(export_root)
-    export_root.mkdir(parents=True, exist_ok=True)
-    for existing in _matching_files_newest_first(export_root, filename_template.format(timestamp="*")):
+def _write_or_reuse_summary(df, output_dir, filename_template, legacy_dirs=None):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    search_dirs = [output_dir]
+    for legacy_dir in legacy_dirs or []:
+        legacy_dir = Path(legacy_dir)
+        if legacy_dir not in search_dirs:
+            search_dirs.append(legacy_dir)
+    existing_files = []
+    for directory in search_dirs:
+        if directory.exists():
+            existing_files.extend(_matching_files_newest_first(directory, filename_template.format(timestamp="*")))
+    existing_files = sorted(existing_files, key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
+    for existing in existing_files:
         try:
             if _dataframes_match(df, pd.read_csv(existing)):
                 return existing
         except Exception as exc:
             logger.warning("Could not compare existing summary %s: %s", existing, exc)
-    output_path = _unique_path(export_root / filename_template.format(timestamp=_output_timestamp()))
+    output_path = _unique_path(output_dir / filename_template.format(timestamp=_output_timestamp()))
     df.to_csv(output_path, index=False)
     return output_path
 
@@ -1411,6 +1652,20 @@ def _prepare_plot_frame(df, x, y):
     return plot_df, x_values, x_label
 
 
+def _load_sin2psi_summary_csv(summary_csv, scans=None):
+    summary_path = Path(summary_csv)
+    if not summary_path.exists():
+        raise FileNotFoundError(f"Summary CSV not found: {summary_path}")
+    df = pd.read_csv(summary_path)
+    if scans is not None and "scan_number" in df.columns:
+        scan_values = [int(scan) for scan in ([scans] if isinstance(scans, int) else scans)]
+        scan_series = pd.to_numeric(df["scan_number"], errors="coerce")
+        df = df.loc[scan_series.isin(scan_values)].copy()
+    if not df.empty and "scan_number" in df.columns:
+        df = df.sort_values("scan_number").reset_index(drop=True)
+    return df, summary_path
+
+
 def _set_ylim_from_points(ax, values, pad_fraction=0.08):
     y_values = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=float)
     y_values = y_values[np.isfinite(y_values)]
@@ -1425,7 +1680,7 @@ def _set_ylim_from_points(ax, values, pad_fraction=0.08):
     ax.set_ylim(ymin - pad, ymax + pad)
 
 
-def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, show=False):
+def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, show=False, summary_csv=None):
     """
     Plot sin2psi gradient (slope) vs a specified x-axis variable (default: scan_number).
     args:
@@ -1434,8 +1689,13 @@ def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, sho
         scans: list of scan numbers to include (default: all scans)
         save: whether to save the plot and summary (default: True)
         show: whether to display the plot (default: False)
+        summary_csv: optional existing summary CSV to plot instead of collecting current JSON outputs
     """
-    df = collect_sin2psi_summaries(data_dir, scans=scans, save_csv=False)
+    if summary_csv:
+        df, selected_summary_path = _load_sin2psi_summary_csv(summary_csv, scans=scans)
+    else:
+        df = collect_sin2psi_summaries(data_dir, scans=scans, save_csv=False)
+        selected_summary_path = None
     plot_df, x_values, x_label = _prepare_plot_frame(df, x, "slope")
 
     yerr = None
@@ -1466,14 +1726,88 @@ def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, sho
     fig.tight_layout()
 
     output_path = None
-    summary_path = None
+    summary_path = selected_summary_path
     if save:
-        export_root = Path(data_dir) / "sin2psi_export"
-        export_root.mkdir(parents=True, exist_ok=True)
+        export_root = _sin2psi_export_root(data_dir)
+        summary_dir = _summary_output_dir(data_dir)
+        plot_dir = _plot_output_dir(data_dir)
+        plot_dir.mkdir(parents=True, exist_ok=True)
         x_suffix = _safe_plot_suffix(x)
         stamp = _output_timestamp()
-        summary_path = _write_or_reuse_summary(df, export_root, "sin2psi_scan_summary_{timestamp}.csv")
-        output_path = _unique_path(export_root / f"sin2psi_gradient_vs_{x_suffix}_{stamp}.png")
+        if summary_path is None:
+            summary_path = _write_or_reuse_summary(
+                df,
+                summary_dir,
+                "sin2psi_scan_summary_{timestamp}.csv",
+                legacy_dirs=[export_root],
+            )
+        output_path = _unique_path(plot_dir / f"sin2psi_gradient_vs_{x_suffix}_{stamp}.png")
+        fig.savefig(output_path, dpi=150)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return {
+        "summary": df,
+        "summary_path": str(summary_path) if summary_path else None,
+        "plot_path": str(output_path) if output_path else None,
+    }
+
+
+def plot_sin2psi_stress(data_dir, x="scan_number", scans=None, save=True, show=False, summary_csv=None):
+    if summary_csv:
+        df, selected_summary_path = _load_sin2psi_summary_csv(summary_csv, scans=scans)
+    else:
+        df = collect_sin2psi_summaries(data_dir, scans=scans, save_csv=False)
+        selected_summary_path = None
+    plot_df, x_values, x_label = _prepare_plot_frame(df, x, "stress")
+    yerr = None
+    if "stress_err" in plot_df.columns:
+        stress_err = pd.to_numeric(plot_df["stress_err"], errors="coerce")
+        if stress_err.notna().any():
+            yerr = stress_err.to_numpy(dtype=float)
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.errorbar(
+        x_values,
+        pd.to_numeric(plot_df["stress"], errors="coerce"),
+        yerr=yerr,
+        fmt=".-",
+        capsize=3,
+        linewidth=0.8,
+        markersize=4,
+    )
+    _set_ylim_from_points(ax, plot_df["stress"])
+    ax.set_xlabel(str(x_label).replace("_", " "))
+    units = ""
+    if "stress_units" in plot_df.columns and plot_df["stress_units"].notna().any():
+        units = f" ({plot_df['stress_units'].dropna().iloc[0]})"
+    ax.set_ylabel(f"stress{units}")
+    ax.set_title(
+        f"sin2psi stress vs {str(x_label).replace('_', ' ')} - "
+        f"{_scan_title(scans, plot_df.get('scan_number'))}"
+    )
+    ax.grid(True, linewidth=0.3)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+
+    output_path = None
+    summary_path = selected_summary_path
+    if save:
+        export_root = _sin2psi_export_root(data_dir)
+        summary_dir = _summary_output_dir(data_dir)
+        plot_dir = _plot_output_dir(data_dir)
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        stamp = _output_timestamp()
+        x_suffix = _safe_plot_suffix(x)
+        if summary_path is None:
+            summary_path = _write_or_reuse_summary(
+                df,
+                summary_dir,
+                "sin2psi_scan_summary_{timestamp}.csv",
+                legacy_dirs=[export_root],
+            )
+        output_path = _unique_path(plot_dir / f"sin2psi_stress_vs_{x_suffix}_{stamp}.png")
         fig.savefig(output_path, dpi=150)
     if show:
         plt.show()
@@ -1668,20 +2002,22 @@ def _plot_fit_value_trends(
     )
     ax.grid(True, linewidth=0.3)
     if len(selectors) > 1:
-        ax.legend(title="Selection")
+        ax.legend()
     fig.autofmt_xdate()
     fig.tight_layout()
 
     output_path = None
     summary_path = None
     if save:
-        export_root = Path(data_dir) / "sin2psi_export"
-        export_root.mkdir(parents=True, exist_ok=True)
+        summary_dir = _summary_output_dir(data_dir)
+        plot_dir = _plot_output_dir(data_dir)
+        summary_dir.mkdir(parents=True, exist_ok=True)
+        plot_dir.mkdir(parents=True, exist_ok=True)
         stamp = _output_timestamp()
         selector_suffix = _safe_plot_suffix(selector)
         x_suffix = _safe_plot_suffix(x)
-        summary_path = _unique_path(export_root / f"sin2psi_{file_prefix}_summary_{stamp}.csv")
-        output_path = _unique_path(export_root / f"sin2psi_{file_prefix}_vs_{x_suffix}_{selector_suffix}_{stamp}.png")
+        summary_path = _unique_path(summary_dir / f"sin2psi_{file_prefix}_summary_{stamp}.csv")
+        output_path = _unique_path(plot_dir / f"sin2psi_{file_prefix}_vs_{x_suffix}_{selector_suffix}_{stamp}.png")
         df.to_csv(summary_path, index=False)
         fig.savefig(output_path, dpi=150)
     if show:
@@ -1747,6 +2083,13 @@ def process_scan(
     track_peak=True,
     track_window=0.4,
     fallback_to_auto=True,
+    elastic_E=None,
+    elastic_nu=None,
+    elastic_E_units=None,
+    stress_reference_two_theta=None,
+    stress_reference_d0=None,
+    stress_wavelength=None,
+    stress_energy=None,
 ):
     """
     Process a single scan: fit each frame, save per-frame results, and perform sin2psi regression.
@@ -1766,6 +2109,9 @@ def process_scan(
         track_peak: bool, whether to seed each frame from the previous successful fit
         track_window: float, half-width in 2theta degrees around a seeded center
         fallback_to_auto: bool, whether seeded fits retry with automatic peak detection
+        elastic_E: Optional[float], Young's modulus for stress calculation
+        elastic_E_units: Optional[str], label for E/stress units
+        elastic_nu: Optional[float], Poisson ratio for stress calculation
     returns: dict with keys:
         'scan_number': int, the scan number processed
         'scan_dir': str, path to the scan output directory
@@ -1934,6 +2280,13 @@ def process_scan(
         auto_exclude_sigma=auto_exclude_sigma,
         auto_exclude_max_iter=auto_exclude_max_iter,
         correction_json=correction_json,
+        elastic_E=elastic_E,
+        elastic_nu=elastic_nu,
+        elastic_E_units=elastic_E_units,
+        stress_reference_two_theta=stress_reference_two_theta,
+        stress_reference_d0=stress_reference_d0,
+        stress_wavelength=stress_wavelength,
+        stress_energy=stress_energy,
     )
 
     df["psi_deg"] = df["chi"].apply(lambda c: 90.0 - float(c) if pd.notna(c) else np.nan)

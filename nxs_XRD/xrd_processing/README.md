@@ -43,6 +43,22 @@ python C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\nxs_XRD\xrd_processing\r
 
 Edit the constants at the top of that file to change the data folder, scan number, exclusions, backup mode, or peak tracking settings.
 
+## GUI and Local Cache
+
+Launch the Tkinter GUI with:
+
+```powershell
+python -m nxs_XRD.xrd_processing.gui_app
+```
+
+The GUI File menu includes parameter import/export and local-cache controls:
+
+- `Select Local Cache Folder...` chooses where cached input files are stored. The selection is saved between sessions in `%LOCALAPPDATA%\nxs_XRD\gui_settings.json`.
+- The default cache folder is `%LOCALAPPDATA%\nxs_XRD\cache`.
+- `Create Local Cache` copies filled input paths from the currently selected tab into a timestamped subfolder of the selected cache folder, then updates those GUI input fields to point at the cached copies.
+- Output directories are not changed by caching, so processed results still go where the output/data fields specify.
+- `Clear Local Cache` deletes the selected cache folder after confirmation.
+
 ## Outputs
 
 For scan `N` the tool writes to:
@@ -70,7 +86,52 @@ proc.plot_sin2psi_gradients(r"C:\path\to\export", x="scan_number")
 proc.plot_sin2psi_gradients(r"C:\path\to\export", x="temperature")
 ```
 
-The plot uses `slope` as the gradient and `slope_err` for error bars. It reuses the latest unchanged summary CSV and writes timestamped files such as `sin2psi_export\sin2psi_scan_summary_<timestamp>.csv` and `sin2psi_export\sin2psi_gradient_vs_<x>_<timestamp>.png`.
+The plot uses `slope` as the gradient and `slope_err` for error bars. It reuses the latest unchanged summary CSV and writes timestamped files such as `sin2psi_export\summaries\sin2psi_scan_summary_<timestamp>.csv` and `sin2psi_export\plots\sin2psi_gradient_vs_<x>_<timestamp>.png`.
+
+To reproduce a plot from a particular saved summary, pass that CSV explicitly:
+
+```python
+proc.plot_sin2psi_gradients(
+    r"C:\path\to\export",
+    x="temperature",
+    summary_csv=r"C:\path\to\export\sin2psi_export\summaries\sin2psi_scan_summary_20260715_120000.csv",
+)
+```
+
+In the GUI, leave `Summary CSV` blank for the current collect/reuse behavior, or browse to a specific summary file for `Gradient` or `Stress` plots.
+
+If elastic constants were supplied during processing or refitting, calculated stress can also be plotted:
+
+```python
+proc.plot_sin2psi_stress(r"C:\path\to\export", x="temperature")
+```
+
+Stress calculation is optional. Supply `elastic_E` and `elastic_nu` to processing/refitting, plus either a stress-free `stress_reference_two_theta`, a stress-free `stress_reference_d0`, or neither to use the equibiaxial inferred-d0 fallback. `E` and the reported stress use the same units; pass `elastic_E_units` such as `"MPa"` or `"GPa"` to label the saved JSON, summary CSV, and stress plot axis.
+
+## Predicted Peak Overlays
+
+Spectra plots can overlay predicted peak positions either from a direct 2theta list or simple lattice parameters. In the GUI, enable `Show predicted peaks` on the Plotting tab. Programmatically, pass `predicted_peaks` to `Spectrum.plot_Ivs2theta(...)`:
+
+```python
+Spectrum(directory=r"C:\path\to\export").plot_Ivs2theta(
+    scanNos=[440],
+    predicted_peaks={"source": "list", "two_theta_list": "31.8 TiO2, 38.5"},
+)
+
+Spectrum(directory=r"C:\path\to\export").plot_Ivs2theta(
+    scanNos=[440],
+    predicted_peaks={
+        "source": "lattice",
+        "lattice_type": "fcc",
+        "a": 4.05,
+        "wavelength": 1.5406,
+        "max_index": 6,
+        "phase_name": "Al",
+    },
+)
+```
+
+CIF parsing is not implemented in this pass; direct peak lists and built-in lattice formulas are supported.
 
 ## Refit Sin2psi Trends
 

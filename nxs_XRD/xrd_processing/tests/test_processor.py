@@ -13,6 +13,7 @@ import pandas as pd
 
 from nxs_XRD.xrd_processing import run_workflow
 from nxs_XRD.xrd_processing import gui_app
+from nxs_XRD.xrd_processing import peak_overlay
 from nxs_XRD.xrd_processing import sin2psi_processor as proc
 
 
@@ -102,6 +103,144 @@ class ProcessorSmokeTest(unittest.TestCase):
         self.assertAlmostEqual(seeded["seed_center"], initial["center"])
         self.assertIn("background_lower", seeded)
         self.assertIn("peak_upper", seeded)
+
+    def test_predicted_peak_helpers_parse_lattice_and_thin_labels(self):
+        manual = peak_overlay.parse_two_theta_peaks("31.8 TiO2, 38.5")
+        self.assertEqual(len(manual), 2)
+        self.assertAlmostEqual(manual[0].two_theta, 31.8)
+        self.assertEqual(manual[0].label, "TiO2")
+
+        peaks = peak_overlay.lattice_predicted_peaks(
+            "fcc",
+            a=4.05,
+            wavelength=1.5406,
+            max_index=3,
+            min_two_theta=20,
+            max_two_theta=90,
+            phase_name="Al",
+        )
+        self.assertTrue(peaks)
+        self.assertTrue(all(20 <= peak.two_theta <= 90 for peak in peaks))
+        self.assertIn("Al", peaks[0].label)
+        rounded_positions = [round(peak.two_theta, 5) for peak in peaks]
+        self.assertEqual(len(rounded_positions), len(set(rounded_positions)))
+
+        thinned = peak_overlay.thin_labelled_peaks(
+            [
+                peak_overlay.PredictedPeak(30.0, "a"),
+                peak_overlay.PredictedPeak(30.2, "b"),
+                peak_overlay.PredictedPeak(32.0, "c"),
+            ],
+            min_spacing=1.0,
+        )
+        self.assertEqual([peak.label for peak in thinned], ["a", "c"])
+        unique = peak_overlay.unique_peak_positions(
+            [
+                peak_overlay.PredictedPeak(30.0, "a"),
+                peak_overlay.PredictedPeak(30.000001, "b"),
+                peak_overlay.PredictedPeak(31.0, "c"),
+            ]
+        )
+        self.assertEqual([peak.label for peak in unique], ["a", "c"])
+
+    def test_spectrum_plot_accepts_predicted_peak_overlay(self):
+        from nxs_XRD.nxs_export import XRD_spectra_anal
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "I_vs_2th_1_chi_0.txt"
+            path.write_text(
+                "\n".join(
+                    [
+                        "# Scan Type: ascan_chi",
+                        "# Energy: 12",
+                        "30.0 1",
+                        "31.0 3",
+                        "32.0 1",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            spectrum = XRD_spectra_anal.Spectrum(tmp)
+            with mock.patch.object(XRD_spectra_anal.plt, "show"):
+                spectrum.plot_Ivs2theta(
+                    [1],
+                    plot_only=["chi"],
+                    predicted_peaks={"source": "list", "two_theta_list": "31.0 test"},
+                )
+            XRD_spectra_anal.plt.close("all")
+
+    def test_stress_with_reference_d0_and_equibiaxial_fallback(self):
+        sin2psi = np.array([0.0, 0.25, 0.5, 0.75])
+        wavelength = 1.0
+        d0 = 2.0
+        strain_slope = 0.001
+        d_values = d0 * (1.0 + strain_slope * sin2psi)
+        two_theta = np.degrees(2.0 * np.arcsin(wavelength / (2.0 * d_values)))
+        df = pd.DataFrame(
+            {
+                "sin2psi": sin2psi,
+                "peak_center": two_theta,
+                "peak_center_err": [0.001] * len(sin2psi),
+                "excluded_from_sin2psi": [False] * len(sin2psi),
+            }
+        )
+
+        reference = proc.calculate_sin2psi_stress(
+            df,
+            elastic_E=200000,
+            elastic_nu=0.3,
+            elastic_E_units="MPa",
+            reference_d0=d0,
+            wavelength=wavelength,
+        )
+        self.assertAlmostEqual(reference["stress"], 200000 / 1.3 * strain_slope, delta=1.0)
+        self.assertEqual(reference["stress_method"], "reference_d0")
+        self.assertEqual(reference["stress_units"], "MPa")
+
+        equibiaxial = proc.calculate_sin2psi_stress(
+            df,
+            elastic_E=200000,
+            elastic_nu=0.3,
+            wavelength=wavelength,
+        )
+        ratio = (d0 * strain_slope) / d0
+        expected = 200000 * ratio / (1.3 + 0.6 * ratio)
+        self.assertAlmostEqual(equibiaxial["stress"], expected, delta=1.0)
+        self.assertEqual(equibiaxial["stress_method"], "equibiaxial_inferred_d0")
+
+    def test_perform_sin2psi_fit_writes_optional_stress_fields(self):
+        sin2psi = np.array([0.0, 0.25, 0.5, 0.75])
+        wavelength = 1.0
+        d0 = 2.0
+        d_values = d0 * (1.0 + 0.001 * sin2psi)
+        two_theta = np.degrees(2.0 * np.arcsin(wavelength / (2.0 * d_values)))
+        psi = np.degrees(np.arcsin(np.sqrt(sin2psi)))
+        chi = 90.0 - psi
+        df = pd.DataFrame(
+            {
+                "frame_index": range(len(sin2psi)),
+                "chi": chi,
+                "peak_center": two_theta,
+                "peak_center_err": [0.001] * len(sin2psi),
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            scan_dir = Path(tmp) / "scan_9"
+            scan_dir.mkdir()
+            summary = proc.perform_sin2psi_fit(
+                df,
+                scan_dir,
+                elastic_E=200000,
+                elastic_nu=0.3,
+                elastic_E_units="MPa",
+                stress_reference_d0=d0,
+                stress_wavelength=wavelength,
+            )
+            saved = json.loads((scan_dir / "sin2psi_fit_params.json").read_text(encoding="utf-8"))
+        self.assertIn("stress", summary)
+        self.assertEqual(saved["stress_method"], "reference_d0")
+        self.assertEqual(saved["stress_units"], "MPa")
+        self.assertIn("stress_err", saved)
 
     def test_process_scan_writes_tracking_metadata_to_csv(self):
         source_files = sorted((self.repo_root / "export").glob("I_vs_2th_440_chi_*.txt"))
@@ -294,9 +433,29 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertNotEqual(all_scans["summary_path"], subset["summary_path"])
             self.assertEqual(all_scans["summary_path"], repeated_all_scans["summary_path"])
 
+    def test_plot_sin2psi_gradients_can_use_selected_summary_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            selected = Path(tmp) / "chosen_summary.csv"
+            pd.DataFrame(
+                [
+                    {"scan_number": 101, "slope": 1.0, "slope_err": 0.1, "temperature": 300.0},
+                    {"scan_number": 102, "slope": 1.5, "slope_err": 0.2, "temperature": 350.0},
+                ]
+            ).to_csv(selected, index=False)
+
+            result = proc.plot_sin2psi_gradients(tmp, x="temperature", scans=[102], show=False, summary_csv=selected)
+
+            self.assertEqual(Path(result["summary_path"]), selected)
+            self.assertEqual(result["summary"].loc[0, "scan_number"], 102)
+            self.assertTrue(Path(result["plot_path"]).exists())
+
     def test_scan_title_uses_plotted_scans_when_selection_is_empty(self):
         self.assertEqual(proc._scan_title(None, [101, 102, 103]), "scans 101-103")
         self.assertEqual(proc._scan_title(None, [101, 103]), "scans 101, 103")
+
+    def test_selector_title_omits_chi_tolerance(self):
+        self.assertEqual(proc._selector_title("chi_5_0"), "chi=5.0°")
+        self.assertEqual(proc._selector_title("frame_2"), "frame 2")
 
     def test_point_limited_y_axis_ignores_large_errorbars(self):
         fig, ax = proc.plt.subplots()
@@ -617,6 +776,7 @@ class ProcessorSmokeTest(unittest.TestCase):
                 "sin2psi.inputs",
                 "sin2psi.peak_options",
                 "sin2psi.exclusions",
+                "sin2psi.stress",
                 "sin2psi.calibration",
             ]:
                 self.assertIn(section_name, app.sections)
@@ -655,12 +815,14 @@ class ProcessorSmokeTest(unittest.TestCase):
             app._update_sin2psi_mode()
             self.assertTrue(app.sections["sin2psi.peak_options"].grid_info())
             self.assertTrue(app.sections["sin2psi.exclusions"].grid_info())
+            self.assertTrue(app.sections["sin2psi.stress"].grid_info())
             self.assertFalse(app.sections["sin2psi.calibration"].grid_info())
 
             app.variables["sin2psi.action"].set("refit")
             app._update_sin2psi_mode()
             self.assertFalse(app.sections["sin2psi.peak_options"].grid_info())
             self.assertTrue(app.sections["sin2psi.exclusions"].grid_info())
+            self.assertTrue(app.sections["sin2psi.stress"].grid_info())
             self.assertFalse(app.sections["sin2psi.calibration"].grid_info())
 
             app.variables["sin2psi.action"].set("correction")
@@ -668,6 +830,7 @@ class ProcessorSmokeTest(unittest.TestCase):
             app._update_sin2psi_mode()
             self.assertFalse(app.sections["sin2psi.peak_options"].grid_info())
             self.assertTrue(app.sections["sin2psi.exclusions"].grid_info())
+            self.assertFalse(app.sections["sin2psi.stress"].grid_info())
             self.assertTrue(app.sections["sin2psi.calibration"].grid_info())
             self.assertTrue(app.widgets["sin2psi.correction_degree"][0].grid_info())
 
@@ -693,6 +856,102 @@ class ProcessorSmokeTest(unittest.TestCase):
                 app.variables["sin2psi.reference_scan"].set("101")
                 app.run_sin2psi_action()
                 self.assertEqual(generated.call_args.kwargs["degree"], 3)
+
+            app.variables["plot.type"].set("stress")
+            app._update_plot_mode()
+            self.assertEqual(app.variables["plot.type"].get(), "stress")
+            self.assertNotEqual(app.widgets["plot.summary_csv"][1].cget("state"), "disabled")
+            app.variables["plot.type"].set("spectra")
+            app._update_plot_mode()
+            self.assertEqual(app.widgets["plot.summary_csv"][1].cget("state"), "disabled")
+            self.assertFalse(app.variables["plot.save_final"].get())
+            self.assertTrue(app.widgets["plot.offset"][0].grid_info())
+            self.assertTrue(app.widgets["plot.labels"][0].grid_info())
+            self.assertFalse(app.widgets["plot.x"][0].grid_info())
+            self.assertFalse(app.widgets["plot.predicted_source"][0].grid_info())
+            self.assertEqual(app._selected_plot_scan_types(), ["chi"])
+            app.variables["plot.scan_type.delta"].set(True)
+            self.assertEqual(app._selected_plot_scan_types(), ["chi", "delta"])
+            self.assertEqual(app._selected_spectra_labels(), [])
+            app.variables["plot.label.type"].set(True)
+            app.variables["plot.label.temp"].set(True)
+            self.assertEqual(app._selected_spectra_labels(), ["type", "temp"])
+            app.variables["plot.show_predicted_peaks"].set(True)
+            app.variables["plot.predicted_source"].set("list")
+            app._update_plot_mode()
+            self.assertTrue(app.widgets["plot.predicted_source"][0].grid_info())
+            self.assertTrue(app.widgets["plot.predicted_twotheta"][0].grid_info())
+            self.assertFalse(app.widgets["plot.predicted_lattice_type"][0].grid_info())
+            app.variables["plot.predicted_source"].set("lattice")
+            app.variables["plot.predicted_lattice_type"].set("fcc")
+            app._update_plot_mode()
+            self.assertFalse(app.widgets["plot.predicted_twotheta"][0].grid_info())
+            self.assertTrue(app.widgets["plot.predicted_lattice_type"][0].grid_info())
+            self.assertNotEqual(app.widgets["plot.predicted_a"][0].cget("state"), "disabled")
+            self.assertEqual(app.widgets["plot.predicted_b"][0].cget("state"), "disabled")
+            self.assertEqual(app.widgets["plot.predicted_c"][0].cget("state"), "disabled")
+
+            app.variables["plot.predicted_lattice_type"].set("tetragonal")
+            app._update_plot_mode()
+            self.assertEqual(app.widgets["plot.predicted_b"][0].cget("state"), "disabled")
+            self.assertNotEqual(app.widgets["plot.predicted_c"][0].cget("state"), "disabled")
+
+            app.variables["plot.predicted_lattice_type"].set("orthorhombic")
+            app._update_plot_mode()
+            self.assertNotEqual(app.widgets["plot.predicted_b"][0].cget("state"), "disabled")
+            self.assertNotEqual(app.widgets["plot.predicted_c"][0].cget("state"), "disabled")
+
+            with tempfile.TemporaryDirectory() as tmp:
+                app.variables["plot.data_dir"].set(tmp)
+                fig = proc.plt.figure()
+                try:
+                    proc.plt.plot([0, 1], [0, 1])
+                    saved_plot = app.save_current_plot()
+                    self.assertTrue(Path(saved_plot).exists())
+                    self.assertEqual(Path(saved_plot).parent.name, "saved_plots")
+                    self.assertEqual(Path(saved_plot).parent.parent, Path(tmp))
+                finally:
+                    proc.plt.close(fig)
+
+            with tempfile.TemporaryDirectory() as tmp:
+                for scan in (101, 102):
+                    Path(tmp, f"I_vs_2th_{scan}_chi_0.txt").write_text(
+                        "\n".join(["# Scan Type: ascan_chi", "# Chi: 0", "30 1", "31 2"]),
+                        encoding="utf-8",
+                    )
+                captured = {}
+
+                class DummySpectrum:
+                    def __init__(self, directory):
+                        captured["directory"] = directory
+
+                    def plot_Ivs2theta(self, scanNos, **kwargs):
+                        captured["scanNos"] = scanNos
+                        captured["kwargs"] = kwargs
+                        return {"ok": True}
+
+                def immediate_run(title, func, on_success=None, run_on_main=False):
+                    captured["result"] = func()
+                    if on_success:
+                        on_success(captured["result"])
+
+                app._run_task = immediate_run
+                app.variables["plot.type"].set("spectra")
+                app.variables["plot.data_dir"].set(tmp)
+                app.variables["plot.scans"].set("")
+                app.variables["plot.offset"].set("0.25")
+                app.variables["plot.show_final"].set(False)
+                app.variables["plot.save_final"].set(True)
+                app.variables["plot.label.type"].set(True)
+                app.variables["plot.label.time"].set(True)
+                with mock.patch.dict("sys.modules", {"XRD_spectra_anal": mock.Mock(Spectrum=DummySpectrum)}):
+                    app.run_plotting()
+                self.assertEqual(captured["scanNos"], [101, 102])
+                self.assertEqual(captured["kwargs"]["offset"], 0.25)
+                self.assertEqual(captured["kwargs"]["label"], ["type", "temp", "time"])
+                self.assertFalse(captured["kwargs"]["show_plot"])
+                self.assertTrue(captured["kwargs"]["save_plot"])
+                self.assertEqual(Path(captured["kwargs"]["save_directory"]).name, "saved_plots")
 
             app.log("Smoke Test")
             self.assertIn("Smoke Test", app.status_var.get())

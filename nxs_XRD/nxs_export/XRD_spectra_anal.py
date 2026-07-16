@@ -1,7 +1,16 @@
 from XRD_funcs import *
 from XPAD_XRD_nxs_export import *
 
+from datetime import datetime
 from glob import glob
+from pathlib import Path
+import re
+
+try:
+    from nxs_XRD.xrd_processing.peak_overlay import build_predicted_peaks, overlay_predicted_peaks
+except Exception:  # pragma: no cover - optional when running this file standalone
+    build_predicted_peaks = None
+    overlay_predicted_peaks = None
 
 class Spectrum():
     def __init__(self, directory: str):
@@ -12,7 +21,19 @@ class Spectrum():
         self.file_directory = directory
 
 
-    def plot_Ivs2theta(self, scanNos: int | list[int], plot_only: str | list[str] = None, offset: float = 0.0, normalise: str=None, single_chi: bool=False, label: str | list = []):
+    def plot_Ivs2theta(
+        self,
+        scanNos: int | list[int],
+        plot_only: str | list[str] = None,
+        offset: float = 0.0,
+        normalise: str=None,
+        single_chi: bool=False,
+        label: str | list = [],
+        predicted_peaks: dict | None = None,
+        show_plot: bool = True,
+        save_plot: bool = False,
+        save_directory: str | None = None,
+    ):
         """
         Plots the spectra for the specified scan numbers.
         args:
@@ -23,6 +44,9 @@ class Spectrum():
             normalise (str): method to normalise the intensity values ('zero' to normalise on the lowest-angle point, 'min' to normalise on the minimum intensity value, 'max' to normalise on the maximum intensity value)
             single_chi (bool): whether to plot only the first 'chi' scan for each scan number
             label (str): whether to add information to scan label. None for no additional information; 'type' for scan type; 'temp' for temperature, 'time' for time
+            show_plot (bool): whether to display the final plot interactively
+            save_plot (bool): whether to save the final plot automatically
+            save_directory (str): optional folder for automatic saved plots
         """
         if isinstance(scanNos, int):
             scanNos = [scanNos]
@@ -48,6 +72,7 @@ class Spectrum():
         norm = plt.Normalize(vmin=0, vmax=len(scanNos)-1)
         fig, ax = plt.subplots(figsize=(10, 6))
 
+        first_energy = None
         ask_flag = True  # Flag to determine if we should ask for scan type for unlabelled scans
         ask_again_flag = True  # Flag to determine if a selection has been made to remember the scan type for the rest of the scans
         for jdx, scanNo in enumerate(scanNos):
@@ -159,8 +184,19 @@ class Spectrum():
                                             break
                             except Exception as e:
                                 print(f"Could not read time from file {fname}: {e}")
+                        if first_energy is None:
+                            try:
+                                with open(fname, 'r') as f:
+                                    for line in f:
+                                        if line.startswith("# Energy:"):
+                                            first_energy = line.split(":", 1)[1].strip()
+                                            break
+                            except Exception:
+                                pass
 
-                        ax.plot(two_theta, intensity + offset_value, '.-', label=f"Scan {scanNo} ({label_str.strip()})", color=cmap(norm(jdx)))
+                        label_suffix = label_str.strip()
+                        plot_label = f"Scan {scanNo} ({label_suffix})" if label_suffix else f"Scan {scanNo}"
+                        ax.plot(two_theta, intensity + offset_value, '.-', label=plot_label, color=cmap(norm(jdx)))
                     else:
                         if single_chi and scan_type == 'chi':
                             continue  # Skip plotting additional chi scans if single_chi is True
@@ -175,8 +211,29 @@ class Spectrum():
                     scan_context = f"scans {min(scanNos)}-{max(scanNos)}"
                 ax.set_title(f"XRD spectra - {scan_context}; types: {', '.join(plot_only)}")
                 ax.grid(True, which='both')
+                if predicted_peaks:
+                    if build_predicted_peaks is None or overlay_predicted_peaks is None:
+                        raise RuntimeError("Predicted peak overlay helper is not available")
+                    x_min, x_max = ax.get_xlim()
+                    options = dict(predicted_peaks)
+                    if options.get("source") == "lattice":
+                        options.setdefault("min_two_theta", x_min)
+                        options.setdefault("max_two_theta", x_max)
+                        if not options.get("wavelength") and not options.get("energy"):
+                            options["energy"] = first_energy
+                    peaks = build_predicted_peaks(**options)
+                    overlay_predicted_peaks(ax, peaks)
                 ax.legend(fontsize='small', ncol=legend_columniser(len(scanNos)))
-                plt.show()
+                if save_plot:
+                    output_dir = Path(save_directory) if save_directory else Path(self.file_directory) / "saved_plots"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    safe_context = re.sub(r"[^0-9A-Za-z]+", "_", scan_context).strip("_") or "spectra"
+                    output_path = output_dir / f"XRD_spectra_{safe_context}_{stamp}.png"
+                    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+                    print(f"Wrote: {output_path}")
+                if show_plot:
+                    plt.show()
 
             except Exception as e:
                 print(f"Error while attempting to plot scan {scanNo}: {e}")

@@ -30,6 +30,13 @@ if str(NXS_EXPORT_DIR) not in sys.path:
 
 
 SIN2PSI_LABEL = "sin\u00b2\u03c8"
+ENERGY_WAVELENGTH_CONSTANT = 12.3984193
+SPECTRA_SCAN_TYPES = ("chi", "delta", "z", "omega")
+SPECTRA_LABEL_OPTIONS = (
+    ("type", "Scan type", "Add the scan type, such as chi or delta, to legend labels."),
+    ("temp", "Temperature", "Add the first-frame temperature metadata to legend labels."),
+    ("time", "Start time", "Add the first-frame start time metadata to legend labels."),
+)
 TAB_NAMES = ["Extraction", "Plotting", "Sorting", f"{SIN2PSI_LABEL} Analysis"]
 TAB_PREFIXES = {
     "Extraction": ("extract.",),
@@ -52,6 +59,7 @@ CACHE_INPUT_KEYS = {
     "extract.nxs_dir",
     "extract.flat_dir",
     "plot.data_dir",
+    "plot.summary_csv",
     "sort.nxs_dir",
     "sort.sample_file",
     "sort.export_dir",
@@ -178,6 +186,7 @@ class XRDGuiApp(ttk.Frame):
         self.settings = self._load_gui_settings()
         self.cache_root = Path(self.settings.get("cache_root") or DEFAULT_CACHE_ROOT)
         self.status_var = tk.StringVar(value="Ready")
+        self._syncing_energy_wavelength = False
         self._configure_master()
         self._build()
 
@@ -358,7 +367,8 @@ class XRDGuiApp(ttk.Frame):
         return combo
 
     def _radio_group(self, parent, row, label, key, options, tooltip="", default=None):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        label_widget = ttk.Label(parent, text=label)
+        label_widget.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         var = tk.StringVar(value=default or options[0][0])
         self.variables[key] = var
         frame = ttk.Frame(parent)
@@ -375,7 +385,7 @@ class XRDGuiApp(ttk.Frame):
             if option_tooltip:
                 ToolTip(radio, option_tooltip)
             radios.append(radio)
-        self.widgets[key] = radios
+        self.widgets[key] = [label_widget, frame] + radios
         return var
 
     def _action_button(self, parent, row, label, command, tooltip=None):
@@ -385,14 +395,27 @@ class XRDGuiApp(ttk.Frame):
         button.grid(row=0, column=0, padx=(0, 8))
         ToolTip(button, tooltip or "Run this workflow with the current tab values.")
 
+    def _plot_buttons(self, parent, row):
+        frame = ttk.Frame(parent)
+        frame.grid(row=row, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        run_button = ttk.Button(frame, text="Run Selected Plot", command=self.run_plotting)
+        run_button.grid(row=0, column=0, padx=(0, 8))
+        ToolTip(run_button, "Run the selected plotting workflow with the current values.")
+        save_button = ttk.Button(frame, text="Save Current Plot", command=self.save_current_plot)
+        save_button.grid(row=0, column=1, padx=(0, 8))
+        ToolTip(save_button, "Save the currently open Matplotlib figure to saved_plots.")
+
     def _set_enabled(self, keys, enabled):
         state = "normal" if enabled else "disabled"
         for key in keys:
             for widget in self.widgets.get(key, []):
-                if isinstance(widget, ttk.Combobox):
-                    widget.configure(state="readonly" if enabled else "disabled")
-                else:
-                    widget.configure(state=state)
+                try:
+                    if isinstance(widget, ttk.Combobox):
+                        widget.configure(state="readonly" if enabled else "disabled")
+                    else:
+                        widget.configure(state=state)
+                except tk.TclError:
+                    pass
 
     def _set_widgets_visible(self, keys, visible):
         for key in keys:
@@ -402,6 +425,40 @@ class XRDGuiApp(ttk.Frame):
                 else:
                     widget.grid_remove()
 
+    def _scan_type_checkboxes(self, parent, row):
+        label_widget = ttk.Label(parent, text="Scan types")
+        label_widget.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        frame = ttk.Frame(parent)
+        frame.grid(row=row, column=1, columnspan=2, sticky="w", pady=4)
+        widgets = [label_widget, frame]
+        for idx, scan_type in enumerate(SPECTRA_SCAN_TYPES):
+            key = f"plot.scan_type.{scan_type}"
+            var = tk.BooleanVar(value=scan_type == "chi")
+            self.variables[key] = var
+            check = ttk.Checkbutton(frame, text=scan_type, variable=var)
+            check.grid(row=0, column=idx, sticky="w", padx=(0, 12))
+            ToolTip(check, f"Include {scan_type} scans in spectra plots.")
+            widgets.append(check)
+        self.widgets["plot.scan_types"] = widgets
+        return frame
+
+    def _spectra_label_checkboxes(self, parent, row):
+        label_widget = ttk.Label(parent, text="Legend labels")
+        label_widget.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        frame = ttk.Frame(parent)
+        frame.grid(row=row, column=1, columnspan=2, sticky="w", pady=4)
+        widgets = [label_widget, frame]
+        for idx, (value, text, tooltip) in enumerate(SPECTRA_LABEL_OPTIONS):
+            key = f"plot.label.{value}"
+            var = tk.BooleanVar(value=False)
+            self.variables[key] = var
+            check = ttk.Checkbutton(frame, text=text, variable=var)
+            check.grid(row=0, column=idx, sticky="w", padx=(0, 12))
+            ToolTip(check, tooltip)
+            widgets.append(check)
+        self.widgets["plot.labels"] = widgets
+        return frame
+
     def _update_extraction_mode(self):
         mode = self.variables["extract.mode"].get()
         self._set_enabled(["extract.mirror"], mode == "batch")
@@ -410,11 +467,62 @@ class XRDGuiApp(ttk.Frame):
     def _update_plot_mode(self):
         mode = self.variables["plot.type"].get()
         selector = self.variables["plot.fwhm_selector"].get()
-        self._set_enabled(["plot.scan_types"], mode == "spectra")
-        self._set_enabled(["plot.x"], mode in {"gradient", "fwhm", "peak_position"})
-        self._set_enabled(["plot.fwhm_selector"], mode in {"fwhm", "peak_position"})
-        self._set_enabled(["plot.fwhm_frame"], mode in {"fwhm", "peak_position"} and selector == "frame")
-        self._set_enabled(["plot.fwhm_chi"], mode in {"fwhm", "peak_position"} and selector == "chi")
+        peak_source = self.variables.get("plot.predicted_source")
+        peak_source_value = peak_source.get() if peak_source is not None else "list"
+        lattice_type_var = self.variables.get("plot.predicted_lattice_type")
+        lattice_type = lattice_type_var.get() if lattice_type_var is not None else "fcc"
+        show_predicted = self._bool("plot.show_predicted_peaks") if "plot.show_predicted_peaks" in self.variables else False
+        spectra_mode = mode == "spectra"
+        trend_mode = mode in {"gradient", "stress", "fwhm", "peak_position"}
+        fit_value_mode = mode in {"fwhm", "peak_position"}
+        self._set_widgets_visible(["plot.scan_types", "plot.labels", "plot.offset", "plot.show_predicted_peaks"], spectra_mode)
+        self._set_enabled(["plot.scan_types", "plot.labels", "plot.offset"], spectra_mode)
+        self._set_widgets_visible(["plot.x"], trend_mode)
+        self._set_enabled(["plot.x"], trend_mode)
+        self._set_widgets_visible(["plot.summary_csv"], mode in {"gradient", "stress"})
+        self._set_enabled(["plot.summary_csv"], mode in {"gradient", "stress"})
+        self._set_widgets_visible(["plot.fwhm_selector"], fit_value_mode)
+        self._set_widgets_visible(["plot.fwhm_frame"], fit_value_mode and selector == "frame")
+        self._set_widgets_visible(["plot.fwhm_chi"], fit_value_mode and selector == "chi")
+        self._set_enabled(["plot.fwhm_selector"], fit_value_mode)
+        self._set_enabled(["plot.fwhm_frame"], fit_value_mode and selector == "frame")
+        self._set_enabled(["plot.fwhm_chi"], fit_value_mode and selector == "chi")
+        self._set_enabled(["plot.show_predicted_peaks"], spectra_mode)
+        predicted_enabled = spectra_mode and show_predicted
+        list_enabled = predicted_enabled and peak_source_value == "list"
+        lattice_enabled = predicted_enabled and peak_source_value == "lattice"
+        self._set_widgets_visible(["plot.predicted_source"], predicted_enabled)
+        self._set_widgets_visible(["plot.predicted_twotheta"], list_enabled)
+        self._set_widgets_visible(
+            [
+                "plot.predicted_lattice_type",
+                "plot.predicted_a",
+                "plot.predicted_b",
+                "plot.predicted_c",
+                "plot.predicted_wavelength",
+                "plot.predicted_energy",
+                "plot.predicted_max_index",
+                "plot.predicted_phase",
+            ],
+            lattice_enabled,
+        )
+        self._set_enabled(["plot.predicted_source"], predicted_enabled)
+        self._set_enabled(["plot.predicted_twotheta"], list_enabled)
+        cubic_like = lattice_type in {"cubic", "fcc", "bcc"}
+        ac_like = lattice_type in {"hcp", "tetragonal"}
+        self._set_enabled(
+            [
+                "plot.predicted_lattice_type",
+                "plot.predicted_wavelength",
+                "plot.predicted_energy",
+                "plot.predicted_max_index",
+                "plot.predicted_phase",
+            ],
+            lattice_enabled,
+        )
+        self._set_enabled(["plot.predicted_a"], lattice_enabled)
+        self._set_enabled(["plot.predicted_b"], lattice_enabled and not cubic_like and not ac_like)
+        self._set_enabled(["plot.predicted_c"], lattice_enabled and not cubic_like)
         self.set_status(f"Plot type: {mode}")
 
     def _update_sort_mode(self):
@@ -435,6 +543,15 @@ class XRDGuiApp(ttk.Frame):
             "sin2psi.auto_exclude",
         ]
         correction_apply_keys = ["sin2psi.correction_json"]
+        stress_keys = [
+            "sin2psi.elastic_E",
+            "sin2psi.elastic_E_units",
+            "sin2psi.elastic_nu",
+            "sin2psi.stress_reference_two_theta",
+            "sin2psi.stress_reference_d0",
+            "sin2psi.stress_wavelength",
+            "sin2psi.stress_energy",
+        ]
         calibration_keys = [
             "sin2psi.reference_folder",
             "sin2psi.reference_scan",
@@ -444,12 +561,14 @@ class XRDGuiApp(ttk.Frame):
         ]
         self._set_section_visible("sin2psi.peak_options", action == "process")
         self._set_section_visible("sin2psi.exclusions", action in {"process", "refit", "correction"})
+        self._set_section_visible("sin2psi.stress", action in {"process", "refit"})
         self._set_section_visible("sin2psi.calibration", action == "correction")
         self._set_widgets_visible(["sin2psi.correction_json"], action in {"process", "refit"})
         self._set_widgets_visible(["sin2psi.correction_degree"], action == "correction" and method_value == "polynomial")
         self._set_enabled(peak_keys, action == "process")
         self._set_enabled(exclusion_keys, action in {"process", "refit", "correction"})
         self._set_enabled(correction_apply_keys, action in {"process", "refit"})
+        self._set_enabled(stress_keys, action in {"process", "refit"})
         self._set_enabled(calibration_keys, action == "correction")
         self._set_enabled(["sin2psi.correction_degree"], action == "correction" and method_value == "polynomial")
         self._set_enabled(["sin2psi.preview"], action in {"process", "refit"})
@@ -541,6 +660,15 @@ class XRDGuiApp(ttk.Frame):
     def _parse_csv_list(self, text):
         return [part.strip() for part in str(text or "").split(",") if part.strip()]
 
+    def _selected_plot_scan_types(self):
+        selected = [scan_type for scan_type in SPECTRA_SCAN_TYPES if self._bool(f"plot.scan_type.{scan_type}")]
+        if not selected:
+            raise ValueError("Select at least one scan type for spectra plotting")
+        return selected
+
+    def _selected_spectra_labels(self):
+        return [value for value, _text, _tooltip in SPECTRA_LABEL_OPTIONS if self._bool(f"plot.label.{value}")]
+
     def _parse_ranges(self, text):
         ranges = []
         for part in self._parse_csv_list(text):
@@ -568,6 +696,116 @@ class XRDGuiApp(ttk.Frame):
         if not scans:
             raise ValueError("At least one scan is required")
         return scans
+
+    def _selected_sin2psi_scans(self, action=None):
+        text = self._get("sin2psi.scans")
+        if text:
+            scans = self._parse_int_list(text, required=True)
+            if not scans:
+                raise ValueError("At least one scan is required")
+            return scans
+
+        if action in {"summaries", "correction"}:
+            return None if action == "summaries" else []
+
+        data_dir = self._required_path("sin2psi.data_dir", "Data directory")
+        include_raw = action in (None, "process")
+        include_processed = action in (None, "refit")
+        scans = proc.discover_scan_numbers(
+            data_dir,
+            include_raw=include_raw,
+            include_processed=include_processed,
+        )
+        if not scans:
+            scans = proc.discover_scan_numbers(data_dir)
+        if not scans:
+            raise ValueError(f"No scans found in {data_dir}")
+        return scans
+
+    def _selected_plot_scans(self, data_dir, plot_type):
+        scans = self._parse_int_list(self._get("plot.scans"), required=False)
+        if scans:
+            return scans
+        if plot_type == "spectra":
+            discovered = proc.discover_scan_numbers(data_dir, include_raw=True, include_processed=False)
+            if not discovered:
+                raise ValueError(f"No exported spectra scans found in {data_dir}")
+            return discovered
+        return None
+
+    def _format_derived_float(self, value):
+        return f"{value:.8g}"
+
+    def _sync_energy_wavelength(self, source_key, target_key):
+        if self._syncing_energy_wavelength:
+            return
+        if self._focused_key() != source_key:
+            return
+        source_text = self._get(source_key)
+        if not source_text:
+            return
+        try:
+            source_value = float(source_text)
+        except (TypeError, ValueError):
+            return
+        if source_value <= 0:
+            return
+        if source_key.endswith("wavelength"):
+            target_value = ENERGY_WAVELENGTH_CONSTANT / source_value
+        elif source_key.endswith("energy"):
+            energy_kev = source_value / 1000.0 if source_value > 1000 else source_value
+            if energy_kev <= 0:
+                return
+            target_value = ENERGY_WAVELENGTH_CONSTANT / energy_kev
+        else:
+            return
+        try:
+            self._syncing_energy_wavelength = True
+            self._set_variable_value(target_key, self._format_derived_float(target_value))
+        finally:
+            self._syncing_energy_wavelength = False
+
+    def _link_energy_wavelength_fields(self, wavelength_key, energy_key):
+        self.variables[wavelength_key].trace_add(
+            "write",
+            lambda *_: self._sync_energy_wavelength(wavelength_key, energy_key),
+        )
+        self.variables[energy_key].trace_add(
+            "write",
+            lambda *_: self._sync_energy_wavelength(energy_key, wavelength_key),
+        )
+
+    def _predicted_peak_options(self):
+        if not self._bool("plot.show_predicted_peaks"):
+            return None
+        source = self._get("plot.predicted_source")
+        if source == "list":
+            return {
+                "source": "list",
+                "two_theta_list": self._required_path("plot.predicted_twotheta", "Predicted 2theta list"),
+            }
+        return {
+            "source": "lattice",
+            "lattice_type": self._get("plot.predicted_lattice_type"),
+            "a": self._optional_float("plot.predicted_a"),
+            "b": self._optional_float("plot.predicted_b"),
+            "c": self._optional_float("plot.predicted_c"),
+            "wavelength": self._optional_float("plot.predicted_wavelength"),
+            "energy": self._optional_float("plot.predicted_energy"),
+            "max_index": self._optional_int("plot.predicted_max_index") or 8,
+            "phase_name": self._get("plot.predicted_phase"),
+        }
+
+    def _stress_options(self):
+        return {
+            "elastic_E": self._optional_float("sin2psi.elastic_E"),
+            "elastic_E_units": self._get("sin2psi.elastic_E_units") or None,
+            "elastic_nu": self._optional_float("sin2psi.elastic_nu"),
+            "stress_reference_two_theta": self._optional_float("sin2psi.stress_reference_two_theta"),
+            "stress_reference_d0": self._optional_float("sin2psi.stress_reference_d0"),
+            "stress_wavelength": self._optional_float("sin2psi.stress_wavelength"),
+            "stress_energy": self._optional_float("sin2psi.stress_energy"),
+        }
 
     def _run_task(self, title, func, on_success=None, run_on_main=False):
         self.log(f"{title}: started")
@@ -987,21 +1225,42 @@ class XRDGuiApp(ttk.Frame):
 
         def task():
             data_dir = self._required_path("plot.data_dir", "Export/data directory")
-            scans = self._parse_int_list(self._get("plot.scans"), required=False) or None
+            scans = self._selected_plot_scans(data_dir, plot_type)
             show = self._bool("plot.show_final")
+            save = self._bool("plot.save_final")
+            summary_csv = self._optional_path("plot.summary_csv")
             if plot_type == "spectra":
-                if scans is None:
-                    raise ValueError("Scan range/list is required for spectra plotting")
                 from XRD_spectra_anal import Spectrum
 
                 spectrum = Spectrum(directory=data_dir)
                 return spectrum.plot_Ivs2theta(
                     scanNos=scans,
-                    plot_only=self._parse_csv_list(self._get("plot.scan_types")) or None,
-                    label=self._parse_csv_list(self._get("plot.x")),
+                    plot_only=self._selected_plot_scan_types(),
+                    offset=self._optional_float("plot.offset") or 0.0,
+                    label=self._selected_spectra_labels(),
+                    predicted_peaks=self._predicted_peak_options(),
+                    show_plot=show,
+                    save_plot=save,
+                    save_directory=str(self._manual_plot_save_dir()),
                 )
             if plot_type == "gradient":
-                return proc.plot_sin2psi_gradients(data_dir, x=self._get("plot.x"), scans=scans, show=show)
+                return proc.plot_sin2psi_gradients(
+                    data_dir,
+                    x=self._get("plot.x"),
+                    scans=scans,
+                    save=save,
+                    show=show,
+                    summary_csv=summary_csv,
+                )
+            if plot_type == "stress":
+                return proc.plot_sin2psi_stress(
+                    data_dir,
+                    x=self._get("plot.x"),
+                    scans=scans,
+                    save=save,
+                    show=show,
+                    summary_csv=summary_csv,
+                )
 
             frame_index = None
             chi = None
@@ -1012,15 +1271,49 @@ class XRDGuiApp(ttk.Frame):
             if frame_index is None and chi is None:
                 raise ValueError("Specify either frame number(s) or chi value(s)")
             if plot_type == "peak_position":
-                return proc.plot_peak_position_trends(data_dir, x=self._get("plot.x"), scans=scans, frame_index=frame_index, chi=chi, show=show)
-            return proc.plot_fwhm_trends(data_dir, x=self._get("plot.x"), scans=scans, frame_index=frame_index, chi=chi, show=show)
+                return proc.plot_peak_position_trends(data_dir, x=self._get("plot.x"), scans=scans, frame_index=frame_index, chi=chi, save=save, show=show)
+            return proc.plot_fwhm_trends(data_dir, x=self._get("plot.x"), scans=scans, frame_index=frame_index, chi=chi, save=save, show=show)
 
         self._run_task("Plotting", task, on_success=self._log_result_paths, run_on_main=plot_type == "spectra" or self._bool("plot.show_final"))
 
+    def _manual_plot_save_dir(self):
+        summary_csv = self._optional_path("plot.summary_csv")
+        if summary_csv:
+            return Path(summary_csv).parent / "saved_plots"
+        data_dir = self._required_path("plot.data_dir", "Export/data directory")
+        return Path(data_dir) / "saved_plots"
+
+    def save_current_plot(self):
+        try:
+            import matplotlib.pyplot as plt
+
+            fig_numbers = plt.get_fignums()
+            if not fig_numbers:
+                messagebox.showinfo(
+                    "Save Current Plot",
+                    "No open Matplotlib figure was found. Run a plot with Show final plot enabled first.",
+                    parent=self.master,
+                )
+                self.log("Save Current Plot: no open figure found.")
+                return None
+            fig = plt.figure(fig_numbers[-1])
+            output_dir = self._manual_plot_save_dir()
+            output_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = output_dir / f"manual_plot_{stamp}.png"
+            fig.savefig(output_path, dpi=150, bbox_inches="tight")
+            self.log(f"Saved current plot: {output_path}")
+            return output_path
+        except Exception as exc:
+            messagebox.showerror("Save Current Plot", f"Could not save current plot:\n{exc}", parent=self.master)
+            self.log(f"Save Current Plot failed: {exc}")
+            return None
+
     def _sin2psi_common(self):
+        action = self._get("sin2psi.action")
         return {
             "data_dir": self._required_path("sin2psi.data_dir", "Data directory"),
-            "scans": self._selected_scan_list("sin2psi.scans"),
+            "scans": self._selected_sin2psi_scans(action),
             "exclude_frames": self._parse_int_list(self._get("sin2psi.exclude_frames"), required=False),
             "exclude_chi_ranges": self._parse_ranges(self._get("sin2psi.exclude_chi")),
             "exclude_sin2psi_ranges": self._parse_ranges(self._get("sin2psi.exclude_sin2psi")),
@@ -1049,6 +1342,7 @@ class XRDGuiApp(ttk.Frame):
                 peak_center=self._optional_float("sin2psi.peak_center"),
                 track_peak=self._bool("sin2psi.track_peak"),
                 track_window=float(self._get("sin2psi.track_window") or 1.0),
+                **self._stress_options(),
             )
             print(f"Wrote: {result['csv_path']}")
             print(f"Wrote: {result['scan_dir']}")
@@ -1066,6 +1360,7 @@ class XRDGuiApp(ttk.Frame):
                 exclude_sin2psi_ranges=common["exclude_sin2psi_ranges"],
                 auto_exclude=common["auto_exclude"],
                 correction_json=common["correction_json"],
+                **self._stress_options(),
             )
             print(f"Updated: {result['csv_path']}")
             print(f"Updated: {result['scan_dir']}")
@@ -1120,7 +1415,7 @@ class XRDGuiApp(ttk.Frame):
         if action not in {"process", "refit"}:
             messagebox.showinfo("Preview", "Preview is available for Process peaks and Refit trends only.", parent=self.master)
             return
-        scans = self._selected_scan_list("sin2psi.scans")
+        scans = self._selected_sin2psi_scans(action)
         first_scan = scans[0]
         remaining = scans[1:]
 
@@ -1204,24 +1499,36 @@ class XRDGuiApp(ttk.Frame):
             [
                 ("spectra", "Spectra", "Plot exported intensity spectra from TXT/CSV data."),
                 ("gradient", "Gradient", f"Plot {SIN2PSI_LABEL} gradient versus scan number or metadata."),
+                ("stress", "Stress", f"Plot calculated {SIN2PSI_LABEL} stress versus scan number or metadata."),
                 ("fwhm", "FWHM", "Plot fitted peak FWHM versus scan number or metadata."),
                 ("peak_position", "Peak position", "Plot fitted peak position versus scan number or metadata."),
             ],
             "spectra",
         )
-        self._entry(options, 3, "Scan types", "plot.scan_types", "Comma-separated types such as chi,delta,z,omega.", default="chi")
+        self._scan_type_checkboxes(options, 3)
+        self._spectra_label_checkboxes(options, 4)
+        self._entry(options, 5, "Offset", "plot.offset", "Vertical offset multiplier for spectra traces.", default="0.0", optional=True)
         self._combo(
             options,
-            4,
+            6,
             "X/metadata field",
             "plot.x",
             X_METADATA_OPTIONS,
             "Metadata column for trend x-axis.",
             "scan_number",
         )
+        self._entry(
+            options,
+            7,
+            "Summary CSV",
+            "plot.summary_csv",
+            "Optional existing sin2psi scan summary CSV to plot for Gradient or Stress. Leave blank to collect/reuse the current latest summary.",
+            "file",
+            optional=True,
+        )
         self._radio_group(
             options,
-            5,
+            8,
             "FWHM selector",
             "plot.fwhm_selector",
             [
@@ -1230,13 +1537,39 @@ class XRDGuiApp(ttk.Frame):
             ],
             "frame",
         )
-        self._entry(options, 6, "Frame number(s)", "plot.fwhm_frame", "Frame index or comma/range list used for FWHM or peak-position trends.")
-        self._entry(options, 7, "Chi value(s)", "plot.fwhm_chi", "Chi value or comma list used for FWHM or peak-position trends; matches within 0.1 degrees.")
-        self._checkbox(options, 8, "Show final plot", "plot.show_final", "Display the final plot interactively in addition to saving it.", optional=True)
+        self._entry(options, 9, "Frame number(s)", "plot.fwhm_frame", "Frame index or comma/range list used for FWHM or peak-position trends.")
+        self._entry(options, 10, "Chi value(s)", "plot.fwhm_chi", "Chi value or comma list used for FWHM or peak-position trends; matches within 0.1 degrees.")
+        self._checkbox(options, 11, "Show final plot", "plot.show_final", "Display the final plot interactively.", optional=True)
+        self._checkbox(options, 11, "Save final plot", "plot.save_final", "Automatically save the final plot when Run Selected Plot is used.", column=1, optional=True)
+        self._checkbox(options, 12, "Show predicted peaks", "plot.show_predicted_peaks", "Overlay predicted peak positions on spectra.", optional=True)
+        self._radio_group(
+            options,
+            13,
+            "Peak source",
+            "plot.predicted_source",
+            [
+                ("list", "2theta list", "Use manually typed 2theta positions."),
+                ("lattice", "Lattice parameters", "Calculate peak positions from simple lattice parameters."),
+            ],
+            "list",
+        )
+        self._entry(options, 14, "2theta peaks", "plot.predicted_twotheta", "Comma-separated peak positions, optionally with labels.", optional=True)
+        self._combo(options, 15, "Lattice type", "plot.predicted_lattice_type", ["cubic", "fcc", "bcc", "hcp", "tetragonal", "orthorhombic"], "Structure/lattice type for peak prediction.", "fcc", optional=True)
+        self._entry(options, 16, "a", "plot.predicted_a", "Lattice parameter a in Angstrom.", optional=True)
+        self._entry(options, 17, "b", "plot.predicted_b", "Lattice parameter b in Angstrom.", optional=True)
+        self._entry(options, 18, "c", "plot.predicted_c", "Lattice parameter c in Angstrom.", optional=True)
+        self._entry(options, 19, "Wavelength", "plot.predicted_wavelength", "Wavelength in Angstrom. Leave blank to use energy.", optional=True)
+        self._entry(options, 20, "Energy", "plot.predicted_energy", "Energy in keV or eV. Leave blank to use scan metadata when available.", optional=True)
+        self._entry(options, 21, "Max hkl index", "plot.predicted_max_index", "Maximum h/k/l index to enumerate.", default="8", optional=True)
+        self._entry(options, 22, "Phase label", "plot.predicted_phase", "Optional phase name prepended to hkl labels.", optional=True)
         plot_type.trace_add("write", lambda *_: self._update_plot_mode())
         self.variables["plot.fwhm_selector"].trace_add("write", lambda *_: self._update_plot_mode())
+        self.variables["plot.show_predicted_peaks"].trace_add("write", lambda *_: self._update_plot_mode())
+        self.variables["plot.predicted_source"].trace_add("write", lambda *_: self._update_plot_mode())
+        self.variables["plot.predicted_lattice_type"].trace_add("write", lambda *_: self._update_plot_mode())
+        self._link_energy_wavelength_fields("plot.predicted_wavelength", "plot.predicted_energy")
         self._update_plot_mode()
-        self._action_button(parent, 1, "Run Selected Plot", command=self.run_plotting)
+        self._plot_buttons(parent, 1)
 
     def _build_sorting_tab(self, parent):
         paths = self._section(parent, "Sorting Inputs", 0)
@@ -1301,7 +1634,17 @@ class XRDGuiApp(ttk.Frame):
         self._checkbox(exclusions, 3, "Auto exclude", "sin2psi.auto_exclude", "Trial residual-based outlier exclusion.", optional=True)
         self._entry(exclusions, 4, "Correction JSON", "sin2psi.correction_json", f"{SIN2PSI_LABEL} correction JSON file.", "file", optional=True)
 
-        correction = self._named_section(parent, "sin2psi.calibration", "Calibration Curve", 3)
+        stress = self._named_section(parent, "sin2psi.stress", "Stress Calculation", 3)
+        self._entry(stress, 0, "E", "sin2psi.elastic_E", "Young's modulus. Stress is reported in the same units as E.", optional=True)
+        self._entry(stress, 1, "E units", "sin2psi.elastic_E_units", "Optional label for E and calculated stress units, e.g. MPa or GPa.", default="GPa", optional=True)
+        self._entry(stress, 2, "nu", "sin2psi.elastic_nu", "Poisson ratio.", optional=True)
+        self._entry(stress, 3, "Stress-free 2theta0", "sin2psi.stress_reference_two_theta", "Optional stress-free 2theta reference.", optional=True)
+        self._entry(stress, 4, "Stress-free d0", "sin2psi.stress_reference_d0", "Optional stress-free d-spacing reference.", optional=True)
+        self._entry(stress, 5, "Stress wavelength", "sin2psi.stress_wavelength", "Optional wavelength in Angstrom.", optional=True)
+        self._entry(stress, 6, "Stress energy", "sin2psi.stress_energy", "Optional energy in keV or eV; otherwise scan metadata is used.", optional=True)
+        self._link_energy_wavelength_fields("sin2psi.stress_wavelength", "sin2psi.stress_energy")
+
+        correction = self._named_section(parent, "sin2psi.calibration", "Calibration Curve", 4)
         self._entry(correction, 0, "Reference folder", "sin2psi.reference_folder", "Reference export folder containing sin2psi_export.", "directory")
         self._entry(correction, 1, "Reference scan", "sin2psi.reference_scan", "Stress-free reference scan number.")
         self._combo(correction, 2, "Method", "sin2psi.correction_method", ["polynomial", "gaussian_process"], "Correction fit method.", "polynomial")
@@ -1310,7 +1653,7 @@ class XRDGuiApp(ttk.Frame):
         action.trace_add("write", lambda *_: self._update_sin2psi_mode())
         self.variables["sin2psi.correction_method"].trace_add("write", lambda *_: self._update_sin2psi_mode())
         self._update_sin2psi_mode()
-        self._sin2psi_buttons(parent, 4)
+        self._sin2psi_buttons(parent, 5)
 
     def show_help(self):
         if self.help_window is not None and self.help_window.winfo_exists():
@@ -1428,15 +1771,27 @@ class XRDGuiApp(ttk.Frame):
                 "Use this tab for plotting already-extracted spectra and summary trends from existing analysis outputs.\n\n"
                 "Export/data directory: For spectra this is normally the export folder containing TXT/CSV files. For gradient, FWHM, "
                 "and peak-position trends this should be the folder containing sin2psi_export.\n"
-                "Scan range/list: Required for spectra. For trend summaries, leave it blank to include all available scans.\n"
-                "Scan types: Used by spectra plotting to choose exported scan families such as chi, delta, z, or omega.\n"
+                "Scan range/list: Leave blank to include all available scans, or enter a single scan, comma list, or range.\n"
+                "Scan types: Check the exported scan families to include in spectra plots: chi, delta, z, or omega.\n"
+                "Legend labels: Choose which extra metadata are added to spectra legend entries. Scan number is always included.\n"
+                "Offset: Vertical spacing multiplier for spectra traces.\n"
                 "X/metadata field: Trend x-axis. Common values include scan_number, temperature, energy, start_time, and frame_time. "
-                "Other metadata columns can work if they were collected into the summary files.\n\n"
+                "Other metadata columns can work if they were collected into the summary files.\n"
+                "Summary CSV: Optional exact summary file for Gradient or Stress plots. Leave blank to collect/reuse the current summary.\n"
+                "Show final plot displays the result interactively. Save final plot writes the result automatically when Run Selected Plot is used.\n"
+                "Save Current Plot: Saves the currently open Matplotlib figure into saved_plots under the data directory, or under the "
+                "selected Summary CSV folder if one is set.\n\n"
                 "Plot type:\n"
                 "- Spectra plots intensity versus 2theta from exported TXT/CSV data.\n"
                 f"- Gradient plots the {SIN2PSI_LABEL} fitted slope versus scan number or metadata, with slope uncertainty as error bars.\n"
+                f"- Stress plots calculated {SIN2PSI_LABEL} stress versus scan number or metadata, with stress uncertainty as error bars.\n"
                 "- FWHM plots fitted peak width versus scan number or metadata, with FWHM uncertainty as error bars when available.\n"
                 "- Peak position plots fitted peak center versus scan number or metadata, with peak-center uncertainty when available.\n\n"
+                "Predicted peaks:\n"
+                "- Show predicted peaks overlays narrow vertical lines on spectra.\n"
+                "- 2theta list accepts comma-separated peak positions, optionally with short labels.\n"
+                "- Lattice parameters calculate simple powder peak positions from a, b, c and wavelength or energy. If energy is blank, "
+                "the spectra plotter tries the exported scan metadata.\n\n"
                 "FWHM / peak-position selector:\n"
                 "- Frame number accepts one frame, a comma list, or a range. Each selected frame is plotted as a separate series.\n"
                 "- Chi value accepts one chi value or a comma list. Each chi value is plotted as a separate series.\n"
@@ -1489,6 +1844,11 @@ class XRDGuiApp(ttk.Frame):
                 f"- Exclude {SIN2PSI_LABEL} ranges removes intervals such as 0.95-1.0 from the fit.\n"
                 "- Auto exclude is the residual-based outlier exclusion option.\n"
                 "- Correction JSON applies a previously generated chi/psi correction curve to the trend fit.\n\n"
+                "Stress calculation:\n"
+                "- E and nu enable optional stress calculation during Process peaks or Refit trends only.\n"
+                "- Enter stress-free 2theta0 or d0 to calculate strain relative to that reference.\n"
+                "- If no reference is supplied, an equibiaxial stress state is assumed and d0 is inferred from the fitted d-spacing trend.\n"
+                "- Wavelength or energy can be supplied explicitly; otherwise energy metadata from the scan is used when available.\n\n"
                 "Calibration curve:\n"
                 "- Reference folder points to the folder containing the reference scan's sin2psi_export output.\n"
                 "- Reference scan is the stress-free reference scan number.\n"

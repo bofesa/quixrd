@@ -23,6 +23,12 @@ AUTO_EXCLUDE = False
 AUTO_EXCLUDE_SIGMA = 3.0
 AUTO_EXCLUDE_MAX_ITER = 1
 CORRECTION_JSON = None
+ELASTIC_E = None
+ELASTIC_NU = None
+STRESS_REFERENCE_TWO_THETA = None
+STRESS_REFERENCE_D0 = None
+STRESS_WAVELENGTH = None
+STRESS_ENERGY = None
 PLOT_FRAMES = True
 BACKUP = False
 PEAK_CENTER = 41.6  # Set to a float value (2theta) to track a specific peak, or None for automatic fitting
@@ -61,6 +67,12 @@ def sin2psi_scans_fit(
     auto_exclude_sigma=_DEFAULT,
     auto_exclude_max_iter=_DEFAULT,
     correction_json=_DEFAULT,
+    elastic_E=_DEFAULT,
+    elastic_nu=_DEFAULT,
+    stress_reference_two_theta=_DEFAULT,
+    stress_reference_d0=_DEFAULT,
+    stress_wavelength=_DEFAULT,
+    stress_energy=_DEFAULT,
     params_json=PARAMS_JSON,
 ):
     """
@@ -84,6 +96,12 @@ def sin2psi_scans_fit(
     auto_exclude_sigma = AUTO_EXCLUDE_SIGMA if auto_exclude_sigma is _DEFAULT else auto_exclude_sigma
     auto_exclude_max_iter = AUTO_EXCLUDE_MAX_ITER if auto_exclude_max_iter is _DEFAULT else auto_exclude_max_iter
     correction_json = CORRECTION_JSON if correction_json is _DEFAULT else correction_json
+    elastic_E = ELASTIC_E if elastic_E is _DEFAULT else elastic_E
+    elastic_nu = ELASTIC_NU if elastic_nu is _DEFAULT else elastic_nu
+    stress_reference_two_theta = STRESS_REFERENCE_TWO_THETA if stress_reference_two_theta is _DEFAULT else stress_reference_two_theta
+    stress_reference_d0 = STRESS_REFERENCE_D0 if stress_reference_d0 is _DEFAULT else stress_reference_d0
+    stress_wavelength = STRESS_WAVELENGTH if stress_wavelength is _DEFAULT else stress_wavelength
+    stress_energy = STRESS_ENERGY if stress_energy is _DEFAULT else stress_energy
     imported = proc.load_processing_params(params_json) if params_json else {}
     imported_options = imported.get("processing_options", imported) if isinstance(imported, dict) else {}
     scans = [scans] if isinstance(scans, int) else scans
@@ -116,6 +134,12 @@ def sin2psi_scans_fit(
             "auto_exclude_sigma": auto_exclude_sigma,
             "auto_exclude_max_iter": auto_exclude_max_iter,
             "correction_json": correction_json,
+            "elastic_E": elastic_E,
+            "elastic_nu": elastic_nu,
+            "stress_reference_two_theta": stress_reference_two_theta,
+            "stress_reference_d0": stress_reference_d0,
+            "stress_wavelength": stress_wavelength,
+            "stress_energy": stress_energy,
         },
         scan_results=scan_results,
     )
@@ -143,6 +167,12 @@ def sin2psi_scans_fit(
                 track_peak=track_peak,
                 track_window=track_window,
                 fallback_to_auto=fallback_to_auto,
+                elastic_E=elastic_E,
+                elastic_nu=elastic_nu,
+                stress_reference_two_theta=stress_reference_two_theta,
+                stress_reference_d0=stress_reference_d0,
+                stress_wavelength=stress_wavelength,
+                stress_energy=stress_energy,
             )
             scan_results.append(
                 {
@@ -177,6 +207,16 @@ def plot_gradient_summary(x=GRADIENT_X, scans=_DEFAULT, show=False):
     return result
 
 
+def plot_stress_summary(x=GRADIENT_X, scans=_DEFAULT, show=False):
+    """Plot calculated sin2psi stress against scan number or metadata."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    scans = _resolve_scans(scans)
+    result = proc.plot_sin2psi_stress(DATA_DIR, x=x, scans=scans, save=True, show=show)
+    print(f"Wrote: {result['summary_path']}")
+    print(f"Wrote: {result['plot_path']}")
+    return result
+
+
 def refit_sin2psi_trends(
     scans=_DEFAULT,
     exclude_frames=_DEFAULT,
@@ -186,6 +226,12 @@ def refit_sin2psi_trends(
     auto_exclude_sigma=_DEFAULT,
     auto_exclude_max_iter=_DEFAULT,
     correction_json=_DEFAULT,
+    elastic_E=_DEFAULT,
+    elastic_nu=_DEFAULT,
+    stress_reference_two_theta=_DEFAULT,
+    stress_reference_d0=_DEFAULT,
+    stress_wavelength=_DEFAULT,
+    stress_energy=_DEFAULT,
     params_json=PARAMS_JSON,
 ):
     """Recompute sin2psi regression outputs from existing scan fit CSVs."""
@@ -198,6 +244,12 @@ def refit_sin2psi_trends(
     auto_exclude_sigma = AUTO_EXCLUDE_SIGMA if auto_exclude_sigma is _DEFAULT else auto_exclude_sigma
     auto_exclude_max_iter = AUTO_EXCLUDE_MAX_ITER if auto_exclude_max_iter is _DEFAULT else auto_exclude_max_iter
     correction_json = CORRECTION_JSON if correction_json is _DEFAULT else correction_json
+    elastic_E = ELASTIC_E if elastic_E is _DEFAULT else elastic_E
+    elastic_nu = ELASTIC_NU if elastic_nu is _DEFAULT else elastic_nu
+    stress_reference_two_theta = STRESS_REFERENCE_TWO_THETA if stress_reference_two_theta is _DEFAULT else stress_reference_two_theta
+    stress_reference_d0 = STRESS_REFERENCE_D0 if stress_reference_d0 is _DEFAULT else stress_reference_d0
+    stress_wavelength = STRESS_WAVELENGTH if stress_wavelength is _DEFAULT else stress_wavelength
+    stress_energy = STRESS_ENERGY if stress_energy is _DEFAULT else stress_energy
     imported = proc.load_processing_params(params_json) if params_json else {}
     imported_options = imported.get("processing_options", imported) if isinstance(imported, dict) else {}
     scans = [scans] if isinstance(scans, int) else scans
@@ -224,6 +276,12 @@ def refit_sin2psi_trends(
             "auto_exclude_sigma": auto_exclude_sigma,
             "auto_exclude_max_iter": auto_exclude_max_iter,
             "correction_json": correction_json,
+            "elastic_E": elastic_E,
+            "elastic_nu": elastic_nu,
+            "stress_reference_two_theta": stress_reference_two_theta,
+            "stress_reference_d0": stress_reference_d0,
+            "stress_wavelength": stress_wavelength,
+            "stress_energy": stress_energy,
         },
         scan_results=scan_results,
     )
@@ -239,6 +297,12 @@ def refit_sin2psi_trends(
                 auto_exclude_sigma=auto_exclude_sigma,
                 auto_exclude_max_iter=auto_exclude_max_iter,
                 correction_json=correction_json,
+                elastic_E=elastic_E,
+                elastic_nu=elastic_nu,
+                stress_reference_two_theta=stress_reference_two_theta,
+                stress_reference_d0=stress_reference_d0,
+                stress_wavelength=stress_wavelength,
+                stress_energy=stress_energy,
             )
             scan_results.append(
                 {
