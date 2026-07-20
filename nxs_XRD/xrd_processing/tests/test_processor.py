@@ -673,19 +673,13 @@ class ProcessorSmokeTest(unittest.TestCase):
             sample_rows = []
             for row in ref_rows:
                 correction_at_ref = float(np.polyval(correction["coefficients"], row["sin2psi"]))
-                peak_center = 40.0
-                for _ in range(8):
-                    scale = math.tan(math.radians(peak_center / 2.0)) / math.tan(
-                        math.radians(correction["reference_two_theta"] / 2.0)
-                    )
-                    peak_center = 40.0 + correction_at_ref * scale
                 sample_rows.append(
                     {
                         "frame_index": row["frame_index"],
                         "chi": row["chi"],
                         "psi_deg": row["psi_deg"],
                         "sin2psi": row["sin2psi"],
-                        "peak_center": peak_center,
+                        "peak_center": 40.0 + correction_at_ref,
                         "peak_center_err": 0.01,
                     }
                 )
@@ -697,9 +691,70 @@ class ProcessorSmokeTest(unittest.TestCase):
 
             self.assertTrue(summary["correction_applied"])
             self.assertEqual(summary["fit_y_column"], "peak_center_corrected")
+            self.assertEqual(summary["correction_selection"]["selected_correction_file"], correction_result["path"])
             self.assertIn("peak_center_corrected", df.columns)
             self.assertTrue((sample_dir / "scan_21_sin2psi_plot.png").exists())
             self.assertAlmostEqual(summary["slope"], 0.0, delta=2e-6)
+
+    def test_multiple_sin2psi_corrections_select_closest_reference_angle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export_root = Path(tmp) / "sin2psi_export"
+            sample_dir = export_root / "scan_22"
+            sample_dir.mkdir(parents=True)
+            low_path = Path(tmp) / "correction_low.json"
+            high_path = Path(tmp) / "correction_high.json"
+            low_path.write_text(
+                json.dumps(
+                    {
+                        "method": "polynomial",
+                        "coefficients": [9.0, 0.0],
+                        "reference_two_theta": 20.0,
+                        "reference_two_theta_provided": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            high_path.write_text(
+                json.dumps(
+                    {
+                        "method": "polynomial",
+                        "coefficients": [0.3, 0.0],
+                        "reference_two_theta": 49.0,
+                        "reference_two_theta_provided": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            rows = []
+            for idx, chi in enumerate([90.0, 60.0, 45.0, 30.0, 0.0]):
+                psi = 90.0 - chi
+                sin2psi = math.sin(math.radians(psi)) ** 2
+                rows.append(
+                    {
+                        "frame_index": idx,
+                        "chi": chi,
+                        "psi_deg": psi,
+                        "sin2psi": sin2psi,
+                        "peak_center": 50.0 + 0.3 * sin2psi,
+                        "peak_center_err": 0.01,
+                        "fit_success": True,
+                    }
+                )
+            pd.DataFrame(rows).to_csv(sample_dir / "scan_22_fits.csv", index=False)
+
+            result = proc.refit_sin2psi_from_csv(tmp, 22, correction_json=[low_path, high_path])
+            summary = proc.load_processing_params(sample_dir / "sin2psi_fit_params.json")
+            df = pd.read_csv(result["csv_path"])
+
+            self.assertTrue(summary["correction_applied"])
+            self.assertEqual(summary["correction_file"], str(high_path))
+            self.assertEqual(summary["correction_selection"]["selected_correction_reference_two_theta"], 49.0)
+            self.assertEqual(summary["correction_selection"]["selection_rule"], "first_frame_peak_center")
+            self.assertAlmostEqual(summary["slope"], 0.0, delta=2e-6)
+            self.assertIn("peak_center_corrected", df.columns)
+            self.assertNotIn("correction_selection", df.columns)
+            self.assertNotIn("scan_representative_two_theta", df.columns)
 
     def test_generate_gaussian_process_correction_defaults_to_true_angle(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -772,6 +827,14 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertTrue(hasattr(app, "help_menu"))
             self.assertTrue(hasattr(app, "log_text"))
             self.assertTrue(hasattr(app, "status_bar"))
+            file_labels = [
+                app.file_menu.entrycget(idx, "label")
+                for idx in range(app.file_menu.index("end") + 1)
+                if app.file_menu.type(idx) in {"command", "checkbutton"}
+            ]
+            self.assertIn("Select Local Cache Folder...", file_labels)
+            self.assertIn("Use Local Cache", file_labels)
+            self.assertNotIn("Create Local Cache", file_labels)
             for section_name in [
                 "sin2psi.inputs",
                 "sin2psi.peak_options",
@@ -810,6 +873,10 @@ class ProcessorSmokeTest(unittest.TestCase):
                 self.assertEqual(app._cache_root(), cache_dir)
                 saved_settings = json.loads(settings_path.read_text(encoding="utf-8"))
                 self.assertEqual(Path(saved_settings["cache_root"]), cache_dir)
+                app.use_local_cache_var.set(True)
+                app._sync_use_local_cache_setting()
+                saved_settings = json.loads(settings_path.read_text(encoding="utf-8"))
+                self.assertTrue(saved_settings["use_local_cache"])
 
             app.variables["sin2psi.action"].set("process")
             app._update_sin2psi_mode()
@@ -914,11 +981,22 @@ class ProcessorSmokeTest(unittest.TestCase):
                     proc.plt.close(fig)
 
             with tempfile.TemporaryDirectory() as tmp:
+                cache_root = Path(tmp) / "cache"
+                app.set_cache_root(cache_root)
                 for scan in (101, 102):
                     Path(tmp, f"I_vs_2th_{scan}_chi_0.txt").write_text(
                         "\n".join(["# Scan Type: ascan_chi", "# Chi: 0", "30 1", "31 2"]),
                         encoding="utf-8",
                     )
+                Path(tmp, "I_vs_2th_999_chi_0.txt").write_text("30 1\n31 2", encoding="utf-8")
+                cache_info = app._ensure_scan_txt_cache(tmp, [101])
+                self.assertEqual(cache_info["copied"], 1)
+                self.assertEqual(cache_info["reused"], 0)
+                self.assertTrue((Path(cache_info["cache_dir"]) / "I_vs_2th_101_chi_0.txt").exists())
+                self.assertFalse((Path(cache_info["cache_dir"]) / "I_vs_2th_999_chi_0.txt").exists())
+                repeated_cache_info = app._ensure_scan_txt_cache(tmp, [101])
+                self.assertEqual(repeated_cache_info["copied"], 0)
+                self.assertEqual(repeated_cache_info["reused"], 1)
                 captured = {}
 
                 class DummySpectrum:
@@ -939,6 +1017,7 @@ class ProcessorSmokeTest(unittest.TestCase):
                 app.variables["plot.type"].set("spectra")
                 app.variables["plot.data_dir"].set(tmp)
                 app.variables["plot.scans"].set("")
+                app.use_local_cache_var.set(True)
                 app.variables["plot.offset"].set("0.25")
                 app.variables["plot.show_final"].set(False)
                 app.variables["plot.save_final"].set(True)
@@ -946,12 +1025,33 @@ class ProcessorSmokeTest(unittest.TestCase):
                 app.variables["plot.label.time"].set(True)
                 with mock.patch.dict("sys.modules", {"XRD_spectra_anal": mock.Mock(Spectrum=DummySpectrum)}):
                     app.run_plotting()
-                self.assertEqual(captured["scanNos"], [101, 102])
+                self.assertEqual(captured["scanNos"], [101, 102, 999])
+                self.assertNotEqual(Path(captured["directory"]), Path(tmp))
+                self.assertTrue(str(captured["directory"]).startswith(str(cache_root)))
                 self.assertEqual(captured["kwargs"]["offset"], 0.25)
                 self.assertEqual(captured["kwargs"]["label"], ["type", "temp", "time"])
                 self.assertFalse(captured["kwargs"]["show_plot"])
                 self.assertTrue(captured["kwargs"]["save_plot"])
                 self.assertEqual(Path(captured["kwargs"]["save_directory"]).name, "saved_plots")
+
+                process_captured = {}
+                with mock.patch.object(gui_app.proc, "process_scan", return_value={"csv_path": "fits.csv", "scan_dir": "scan_101"}) as processed:
+                    common = {
+                        "data_dir": tmp,
+                        "use_cache": True,
+                        "exclude_frames": [],
+                        "exclude_chi_ranges": [],
+                        "exclude_sin2psi_ranges": [],
+                        "auto_exclude": False,
+                        "correction_json": None,
+                    }
+                    result = app._process_sin2psi_scans(common, [101])
+                    process_captured["files"] = processed.call_args.kwargs["files"]
+                    process_captured["data_dir"] = processed.call_args.kwargs["data_dir"]
+                self.assertEqual(result[0]["csv_path"], "fits.csv")
+                self.assertEqual(process_captured["data_dir"], tmp)
+                self.assertTrue(process_captured["files"])
+                self.assertTrue(str(process_captured["files"][0]).startswith(str(cache_root)))
 
             app.log("Smoke Test")
             self.assertIn("Smoke Test", app.status_var.get())

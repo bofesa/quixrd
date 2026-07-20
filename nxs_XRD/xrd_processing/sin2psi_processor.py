@@ -908,6 +908,8 @@ def _auto_exclude_sin2psi_outliers(df, base_mask, sigma=3.0, max_iter=1, y_colum
 
 
 def _theta_scale(sample_two_theta, reference_two_theta):
+    # Currently unused: corrections are applied as absolute 2theta offsets.
+    # Keep this helper for a possible future return to theta-dependent scaling.
     sample_theta = np.radians(pd.to_numeric(sample_two_theta, errors="coerce") / 2.0)
     reference_theta = math.radians(float(reference_two_theta) / 2.0)
     ref_tan = math.tan(reference_theta)
@@ -931,7 +933,86 @@ def load_sin2psi_correction(correction_json):
     for key in required:
         if key not in correction:
             raise ValueError(f"Missing '{key}' in sin2psi correction: {correction_json}")
+    correction.setdefault("source_file", str(correction_json))
     return correction
+
+
+def _correction_paths(correction_json):
+    if correction_json is None:
+        return []
+    if isinstance(correction_json, (str, os.PathLike)):
+        text = os.fspath(correction_json)
+        if ";" in text:
+            return [part.strip() for part in text.split(";") if part.strip()]
+        return [correction_json]
+    if isinstance(correction_json, Sequence) and not isinstance(correction_json, (bytes, bytearray)):
+        paths = []
+        for item in correction_json:
+            paths.extend(_correction_paths(item))
+        return paths
+    return [correction_json]
+
+
+def load_sin2psi_corrections(correction_json):
+    return [load_sin2psi_correction(path) for path in _correction_paths(correction_json)]
+
+
+def _representative_peak_center_for_correction(df):
+    if "peak_center" not in df.columns:
+        return None, None
+
+    work = df.copy()
+    work["peak_center"] = pd.to_numeric(work["peak_center"], errors="coerce")
+    if "fit_success" in work.columns:
+        success = work["fit_success"].astype(str).str.lower().isin({"true", "1", "yes"})
+    else:
+        success = pd.Series(True, index=work.index)
+    work = work.loc[work["peak_center"].notna()]
+    if work.empty:
+        return None, None
+
+    sort_columns = ["frame_index"] if "frame_index" in work.columns else None
+    ordered = work.sort_values(sort_columns) if sort_columns else work
+    first = ordered.iloc[0]
+    first_success = bool(success.loc[first.name]) if first.name in success.index else True
+    if first_success and np.isfinite(float(first["peak_center"])):
+        return float(first["peak_center"]), "first_frame_peak_center"
+
+    successful = work.loc[success.reindex(work.index, fill_value=False)]
+    if successful.empty:
+        return None, None
+    return float(np.nanmedian(successful["peak_center"].to_numpy(dtype=float))), "median_successful_peak_center"
+
+
+def select_sin2psi_correction(correction_json, df):
+    corrections = load_sin2psi_corrections(correction_json)
+    if not corrections:
+        return None, None
+    scan_two_theta, selection_rule = _representative_peak_center_for_correction(df)
+    if scan_two_theta is None:
+        return None, None
+
+    selectable = []
+    for correction in corrections:
+        try:
+            reference = float(correction["reference_two_theta"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if np.isfinite(reference):
+            selectable.append((abs(reference - scan_two_theta), correction, reference))
+    if not selectable:
+        raise ValueError("No supplied sin2psi correction JSON contains a usable reference_two_theta")
+
+    _, selected, reference = min(selectable, key=lambda item: item[0])
+    selection = {
+        "selected_correction_file": selected.get("source_file"),
+        "selected_correction_method": selected.get("method", "polynomial"),
+        "selected_correction_reference_two_theta": float(reference),
+        "scan_representative_two_theta": float(scan_two_theta),
+        "selection_rule": selection_rule,
+        "candidate_correction_files": [correction.get("source_file") for correction in corrections],
+    }
+    return selected, selection
 
 
 def _gp_kernel(x1, x2, length_scale, signal_variance):
@@ -986,10 +1067,9 @@ def _apply_sin2psi_correction(df, correction):
     raw_correction = _evaluate_sin2psi_correction(correction, corrected["sin2psi"])
     if not correction.get("reference_two_theta_provided", True):
         raw_correction = raw_correction - reference_two_theta
-    scale = _theta_scale(corrected["peak_center"], reference_two_theta)
     corrected["sin2psi_correction_reference"] = raw_correction
-    corrected["sin2psi_correction_scale"] = scale
-    corrected["sin2psi_correction"] = raw_correction * scale
+    corrected["sin2psi_correction_scale"] = 1.0
+    corrected["sin2psi_correction"] = raw_correction
     corrected["peak_center_uncorrected"] = corrected["peak_center"]
     corrected["peak_center_corrected"] = corrected["peak_center"] - corrected["sin2psi_correction"]
     return corrected
@@ -1213,7 +1293,7 @@ def perform_sin2psi_fit(
     df["sin2psi"] = df["psi_deg"].apply(
         lambda p: math.sin(math.radians(float(p))) ** 2 if pd.notna(p) else np.nan
     )
-    correction = load_sin2psi_correction(correction_json) if correction_json else None
+    correction, correction_selection = select_sin2psi_correction(correction_json, df)
     y_column = "peak_center"
     if correction is not None:
         df = _apply_sin2psi_correction(df, correction)
@@ -1262,7 +1342,9 @@ def perform_sin2psi_fit(
         "auto_exclude_max_iter": int(auto_exclude_max_iter),
         "auto_excluded_frames": auto_excluded_frames,
         "correction_applied": correction is not None,
-        "correction_file": str(correction_json) if correction_json else None,
+        "correction_file": correction_selection.get("selected_correction_file") if correction_selection else None,
+        "correction_files": [str(path) for path in _correction_paths(correction_json)],
+        "correction_selection": correction_selection,
         "correction": correction,
         "fit_y_column": y_column,
         "metadata": _scan_metadata_from_df(df),
@@ -1375,8 +1457,9 @@ def refit_sin2psi_from_csv(
         lambda p: math.sin(math.radians(float(p))) ** 2 if pd.notna(p) else np.nan
     )
     y_column = "peak_center"
-    if correction_json:
-        df = _apply_sin2psi_correction(df, load_sin2psi_correction(correction_json))
+    correction = summary.get("correction") if correction_json else None
+    if correction:
+        df = _apply_sin2psi_correction(df, correction)
         y_column = "peak_center_corrected"
     exclusion_mask, _ = _sin2psi_exclusion_mask(
         df,
@@ -2293,8 +2376,9 @@ def process_scan(
     df["sin2psi"] = df["psi_deg"].apply(
         lambda p: math.sin(math.radians(float(p))) ** 2 if pd.notna(p) else np.nan
     )
-    if correction_json:
-        df = _apply_sin2psi_correction(df, load_sin2psi_correction(correction_json))
+    correction = summary.get("correction") if correction_json else None
+    if correction:
+        df = _apply_sin2psi_correction(df, correction)
     exclusion_mask, _ = _sin2psi_exclusion_mask(
         df,
         excluded_frames=exclude_frames,
@@ -2307,7 +2391,7 @@ def process_scan(
             exclusion_mask,
             sigma=auto_exclude_sigma,
             max_iter=auto_exclude_max_iter,
-            y_column="peak_center_corrected" if correction_json else "peak_center",
+            y_column="peak_center_corrected" if correction else "peak_center",
         )
     df["excluded_from_sin2psi"] = exclusion_mask
     df.to_csv(csv_path, index=False)

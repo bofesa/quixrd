@@ -55,8 +55,8 @@ The GUI File menu includes parameter import/export and local-cache controls:
 
 - `Select Local Cache Folder...` chooses where cached input files are stored. The selection is saved between sessions in `%LOCALAPPDATA%\nxs_XRD\gui_settings.json`.
 - The default cache folder is `%LOCALAPPDATA%\nxs_XRD\cache`.
-- `Create Local Cache` copies filled input paths from the currently selected tab into a timestamped subfolder of the selected cache folder, then updates those GUI input fields to point at the cached copies.
-- Output directories are not changed by caching, so processed results still go where the output/data fields specify.
+- `Use Local Cache` in the File menu copies only the needed exported `I_vs_2th` TXT scan files into the cache on demand, then reads from the cached copies.
+- Output directories are not changed by caching, so processed results still go where the original output/data fields specify.
 - `Clear Local Cache` deletes the selected cache folder after confirmation.
 
 ## Outputs
@@ -177,6 +177,8 @@ refit_sin2psi_trends(
     correction_json=r"C:\path\to\sin2psi_correction_scan_120_20260706_120000.json",
 )
 ```
+
+Multiple correction JSON files may be supplied as a Python list, or as semicolon-separated paths in the GUI. The closest correction is selected once per scan from the uncorrected fitted peak position, and the correction is applied as an absolute 2theta offset with no angle-dependent scaling.
 
 When a correction is applied, `scan_N_fits.csv` includes `peak_center_uncorrected`, `sin2psi_correction`, and `peak_center_corrected`. The per-scan plot is saved as `scan_N_sin2psi_plot.png`; corrected plots also show uncorrected points at low opacity.
 

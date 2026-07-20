@@ -9,6 +9,7 @@ import threading
 import traceback
 import tkinter as tk
 import tkinter.font as tkfont
+import hashlib
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from io import StringIO
@@ -55,18 +56,6 @@ X_METADATA_OPTIONS = [
     "psi_deg",
     "sin2psi",
 ]
-CACHE_INPUT_KEYS = {
-    "extract.nxs_dir",
-    "extract.flat_dir",
-    "plot.data_dir",
-    "plot.summary_csv",
-    "sort.nxs_dir",
-    "sort.sample_file",
-    "sort.export_dir",
-    "sin2psi.data_dir",
-    "sin2psi.correction_json",
-    "sin2psi.reference_folder",
-}
 APP_CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".config") / "nxs_XRD"
 GUI_SETTINGS_PATH = APP_CONFIG_DIR / "gui_settings.json"
 DEFAULT_CACHE_ROOT = APP_CONFIG_DIR / "cache"
@@ -185,6 +174,7 @@ class XRDGuiApp(ttk.Frame):
         self.settings_path = GUI_SETTINGS_PATH
         self.settings = self._load_gui_settings()
         self.cache_root = Path(self.settings.get("cache_root") or DEFAULT_CACHE_ROOT)
+        self.use_local_cache_var = tk.BooleanVar(value=self._use_local_cache_default())
         self.status_var = tk.StringVar(value="Ready")
         self._syncing_energy_wavelength = False
         self._configure_master()
@@ -241,7 +231,11 @@ class XRDGuiApp(ttk.Frame):
         file_menu.add_command(label="Reveal Selected Path in File Explorer", command=self.reveal_selected_path)
         file_menu.add_separator()
         file_menu.add_command(label="Select Local Cache Folder...", command=self.select_local_cache_folder)
-        file_menu.add_command(label="Create Local Cache", command=self.create_local_cache)
+        file_menu.add_checkbutton(
+            label="Use Local Cache",
+            variable=self.use_local_cache_var,
+            command=self._sync_use_local_cache_setting,
+        )
         file_menu.add_command(label="Clear Local Cache", command=self.clear_local_cache)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.master.destroy)
@@ -1060,6 +1054,7 @@ class XRDGuiApp(ttk.Frame):
     def _save_gui_settings(self):
         self.settings_path.parent.mkdir(parents=True, exist_ok=True)
         self.settings["cache_root"] = str(self.cache_root)
+        self.settings["use_local_cache"] = bool(self.use_local_cache_var.get())
         self.settings_path.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
 
     def _cache_root(self):
@@ -1081,53 +1076,68 @@ class XRDGuiApp(ttk.Frame):
         if value:
             self.set_cache_root(value)
 
-    def _cache_keys_for_current_tab(self):
-        return [key for key in self._keys_for_tab(self._selected_tab_name()) if key in CACHE_INPUT_KEYS]
+    def _use_local_cache_default(self):
+        return bool(self.settings.get("use_local_cache", False))
 
-    def _copy_to_cache(self, source, target_root, key):
-        source = Path(source)
-        if not source.exists():
-            print(f"Skipped missing cache input: {source}")
-            return None
-        target_parent = target_root / key.replace(".", "_")
-        target_parent.mkdir(parents=True, exist_ok=True)
-        target = target_parent / source.name
-        if source.is_dir():
-            shutil.copytree(source, target, dirs_exist_ok=True)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
+    def _use_local_cache(self):
+        return bool(self.use_local_cache_var.get())
+
+    def _sync_use_local_cache_setting(self):
+        self._save_gui_settings()
+        state = "enabled" if self._use_local_cache() else "disabled"
+        self.log(f"Local cache {state}.")
+
+    def _cache_source_dir(self, source_dir):
+        source_path = Path(source_dir)
+        try:
+            source_text = str(source_path.resolve())
+        except Exception:
+            source_text = str(source_path.absolute())
+        digest = hashlib.sha1(source_text.lower().encode("utf-8")).hexdigest()[:12]
+        slug = proc._safe_plot_suffix(source_path.name or "data")
+        return self._cache_root() / "exported_txt" / f"{slug}_{digest}"
+
+    def _scan_txt_sources(self, data_dir, scans):
+        source_dir = Path(data_dir)
+        paths = []
+        missing_scans = []
+        for scan in sorted({int(scan) for scan in scans}):
+            matches = sorted(source_dir.glob(f"I_vs_2th_{scan}_*.txt"))
+            if matches:
+                paths.extend(matches)
+            else:
+                missing_scans.append(scan)
+        unique = {}
+        for path in paths:
+            unique[path.name] = path
+        return [unique[name] for name in sorted(unique)], missing_scans
+
+    def _ensure_scan_txt_cache(self, data_dir, scans):
+        source_paths, missing_scans = self._scan_txt_sources(data_dir, scans)
+        cache_dir = self._cache_source_dir(data_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        reused = 0
+        for source in source_paths:
+            target = cache_dir / source.name
+            if target.exists():
+                reused += 1
+                continue
             shutil.copy2(source, target)
-        return target
-
-    def create_local_cache(self):
-        keys = self._cache_keys_for_current_tab()
-        values = [(key, self._get(key)) for key in keys if self._get(key)]
-        if not values:
-            messagebox.showinfo("Create Local Cache", "No input paths are filled on the current tab.", parent=self.master)
-            return
-
-        tab_slug = self._selected_tab_name().lower().replace(" ", "_").replace("\u00b2", "2").replace("\u03c8", "psi")
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        cache_root = self._cache_root() / f"{tab_slug}_{stamp}"
-
-        def task():
-            cached = []
-            for key, value in values:
-                target = self._copy_to_cache(value, cache_root, key)
-                if target is not None:
-                    cached.append((key, str(target)))
-                    print(f"Cached {key}: {value} -> {target}")
-            if not cached:
-                raise RuntimeError("No cacheable paths were copied")
-            return cached
-
-        def apply_cached_paths(cached):
-            for key, target in cached:
-                self._set_variable_value(key, target)
-            self._refresh_dynamic_states()
-            self.log(f"Updated {len(cached)} input path(s) to use the local cache at {self._cache_root()}.")
-
-        self._run_task("Create Local Cache", task, on_success=apply_cached_paths)
+            copied += 1
+        print(
+            f"Local cache: {copied} copied, {reused} reused"
+            f" for {len(source_paths)} scan file(s) in {cache_dir}"
+        )
+        if missing_scans:
+            print(f"Local cache: no source TXT files found for scan(s): {missing_scans}")
+        return {
+            "cache_dir": str(cache_dir),
+            "copied": copied,
+            "reused": reused,
+            "missing_scans": missing_scans,
+            "source_count": len(source_paths),
+        }
 
     def clear_local_cache(self):
         cache_root = self._cache_root()
@@ -1232,7 +1242,11 @@ class XRDGuiApp(ttk.Frame):
             if plot_type == "spectra":
                 from XRD_spectra_anal import Spectrum
 
-                spectrum = Spectrum(directory=data_dir)
+                spectrum_dir = data_dir
+                if self._use_local_cache():
+                    cache_info = self._ensure_scan_txt_cache(data_dir, scans)
+                    spectrum_dir = cache_info["cache_dir"]
+                spectrum = Spectrum(directory=spectrum_dir)
                 return spectrum.plot_Ivs2theta(
                     scanNos=scans,
                     plot_only=self._selected_plot_scan_types(),
@@ -1314,6 +1328,7 @@ class XRDGuiApp(ttk.Frame):
         return {
             "data_dir": self._required_path("sin2psi.data_dir", "Data directory"),
             "scans": self._selected_sin2psi_scans(action),
+            "use_cache": self._use_local_cache(),
             "exclude_frames": self._parse_int_list(self._get("sin2psi.exclude_frames"), required=False),
             "exclude_chi_ranges": self._parse_ranges(self._get("sin2psi.exclude_chi")),
             "exclude_sin2psi_ranges": self._parse_ranges(self._get("sin2psi.exclude_sin2psi")),
@@ -1324,12 +1339,17 @@ class XRDGuiApp(ttk.Frame):
 
     def _process_sin2psi_scans(self, common, scans):
         results = []
+        source_dir = common["data_dir"]
+        read_dir = source_dir
+        if common.get("use_cache"):
+            cache_info = self._ensure_scan_txt_cache(source_dir, scans)
+            read_dir = cache_info["cache_dir"]
         for scan in scans:
-            files = proc.discover_scan_files(common["data_dir"], scan)
+            files = proc.discover_scan_files(read_dir, scan)
             if not files:
                 raise FileNotFoundError(f"No matching scan files found for scan {scan}")
             result = proc.process_scan(
-                data_dir=common["data_dir"],
+                data_dir=source_dir,
                 scan_number=scan,
                 files=files,
                 exclude_frames=common["exclude_frames"],
@@ -1539,7 +1559,7 @@ class XRDGuiApp(ttk.Frame):
         )
         self._entry(options, 9, "Frame number(s)", "plot.fwhm_frame", "Frame index or comma/range list used for FWHM or peak-position trends.")
         self._entry(options, 10, "Chi value(s)", "plot.fwhm_chi", "Chi value or comma list used for FWHM or peak-position trends; matches within 0.1 degrees.")
-        self._checkbox(options, 11, "Show final plot", "plot.show_final", "Display the final plot interactively.", optional=True)
+        self._checkbox(options, 11, "Show final plot", "plot.show_final", "Display the final plot interactively.", optional=True, default=True)
         self._checkbox(options, 11, "Save final plot", "plot.save_final", "Automatically save the final plot when Run Selected Plot is used.", column=1, optional=True)
         self._checkbox(options, 12, "Show predicted peaks", "plot.show_predicted_peaks", "Overlay predicted peak positions on spectra.", optional=True)
         self._radio_group(
@@ -1618,7 +1638,7 @@ class XRDGuiApp(ttk.Frame):
             ],
             "process",
         )
-        self._checkbox(inputs, 3, "Show final plot", "sin2psi.show_final", "Display final summary/correction plots interactively when supported.", optional=True)
+        self._checkbox(inputs, 3, "Show final plot", "sin2psi.show_final", "Display final summary/correction plots interactively when supported.", optional=True, default=True)
 
         peak_options = self._named_section(parent, "sin2psi.peak_options", "Peak Fitting Options", 1)
         self._entry(peak_options, 0, "Peak center", "sin2psi.peak_center", "Initial 2theta peak center; leave blank for auto.", optional=True)
@@ -1632,7 +1652,7 @@ class XRDGuiApp(ttk.Frame):
         self._entry(exclusions, 1, "Exclude chi ranges", "sin2psi.exclude_chi", "Ranges such as 0-5,85-90.", optional=True)
         self._entry(exclusions, 2, f"Exclude {SIN2PSI_LABEL} ranges", "sin2psi.exclude_sin2psi", "Ranges such as 0.95-1.0.", optional=True)
         self._checkbox(exclusions, 3, "Auto exclude", "sin2psi.auto_exclude", "Trial residual-based outlier exclusion.", optional=True)
-        self._entry(exclusions, 4, "Correction JSON", "sin2psi.correction_json", f"{SIN2PSI_LABEL} correction JSON file.", "file", optional=True)
+        self._entry(exclusions, 4, "Correction JSON(s)", "sin2psi.correction_json", f"{SIN2PSI_LABEL} correction JSON file, or multiple files separated by semicolons.", "file", optional=True)
 
         stress = self._named_section(parent, "sin2psi.stress", "Stress Calculation", 3)
         self._entry(stress, 0, "E", "sin2psi.elastic_E", "Young's modulus. Stress is reported in the same units as E.", optional=True)
@@ -1742,8 +1762,8 @@ class XRDGuiApp(ttk.Frame):
                 "field, it opens the first filled path field on the active tab.\n"
                 "Select Local Cache Folder chooses where cached input files are stored. The selected folder is saved between GUI "
                 f"sessions. The default is {DEFAULT_CACHE_ROOT}.\n"
-                "Create Local Cache copies filled input paths from the current tab into the selected local cache folder. The copied "
-                "input fields are then updated to point at the cached copies. Output folders are not changed.\n"
+                "Use Local Cache in the File menu copies only needed exported I_vs_2th TXT scan files into the cache "
+                "on demand. Existing cached files with the same filename are reused. Output folders are not changed.\n"
                 "Clear Local Cache deletes the selected local cache folder after confirmation.\n",
             ),
             (
