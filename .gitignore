@@ -1,4 +1,4 @@
-# Ignore all top-level files and folders by default.
+﻿# Ignore all top-level files and folders by default.
 /*
 
 # Keep this ignore file tracked.
@@ -7,8 +7,8 @@
 # Keep project code and working notes visible to git.
 !/Little Programs/
 !/Little Programs/**
-!/nxs_XRD/
-!/nxs_XRD/**
+!/quixrd/
+!/quixrd/**
 
 # Python/cache artifacts inside the kept folders.
 __pycache__/
@@ -53,5 +53,5 @@ venv/
 .gitignore
 
 # Working and notes files
-nxs_XRD/plans.txt
+quixrd/plans.txt
 Little Programs/Cu_FCC.txt

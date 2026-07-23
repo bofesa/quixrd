@@ -1,4 +1,4 @@
-"""Sin2psi processing helpers.
+﻿"""Sin2psi processing helpers.
 
 The sin2psi analysis workflow in this module is based on the approach from
 materialsguy/Bessy-II-KMC-II-insitu-sin2psi:
@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib
 
-if not os.environ.get("NXS_XRD_GUI_INTERACTIVE"):
+if not os.environ.get("quixrd_GUI_INTERACTIVE"):
     matplotlib.use("Agg", force=True)
 
 import matplotlib.pyplot as plt
@@ -27,6 +27,11 @@ import numpy as np
 import pandas as pd
 from lmfit import Model
 from scipy.signal import find_peaks
+
+try:
+    from . import twotheta_calibration as tth_cal
+except ImportError:  # pragma: no cover - standalone execution
+    import twotheta_calibration as tth_cal
 
 try:
     import statsmodels.api as sm
@@ -2173,6 +2178,7 @@ def process_scan(
     stress_reference_d0=None,
     stress_wavelength=None,
     stress_energy=None,
+    twotheta_calibration_json=None,
 ):
     """
     Process a single scan: fit each frame, save per-frame results, and perform sin2psi regression.
@@ -2195,6 +2201,7 @@ def process_scan(
         elastic_E: Optional[float], Young's modulus for stress calculation
         elastic_E_units: Optional[str], label for E/stress units
         elastic_nu: Optional[float], Poisson ratio for stress calculation
+        twotheta_calibration_json: Optional[str], 2theta-axis calibration JSON applied before peak fitting
     returns: dict with keys:
         'scan_number': int, the scan number processed
         'scan_dir': str, path to the scan output directory
@@ -2230,10 +2237,24 @@ def process_scan(
     if not files:
         raise RuntimeError(f"No matching scan files found for scan {scan_number}")
 
+    twotheta_calibration = (
+        tth_cal.load_calibration(twotheta_calibration_json) if twotheta_calibration_json else None
+    )
     rows = []
     current_seed = float(peak_center) if peak_center is not None else None
     for idx, filepath in enumerate(files):
         parsed = parse_txt_scan(filepath)
+        if twotheta_calibration is not None:
+            corrected_tth, corrected_intensity, applied = tth_cal.apply_calibration_to_profile(
+                parsed["tth"],
+                parsed["intensity"],
+                twotheta_calibration,
+                metadata=parsed.get("metadata", {}),
+            )
+            parsed["tth"] = corrected_tth
+            parsed["intensity"] = corrected_intensity
+            if applied:
+                parsed.setdefault("metadata", {})["TwoTheta Correction"] = str(twotheta_calibration_json)
         seed_center = current_seed if (idx == 0 or track_peak) else None
         try:
             fit_result = fit_frame(

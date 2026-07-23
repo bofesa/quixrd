@@ -1,8 +1,8 @@
-from pathlib import Path
+﻿from pathlib import Path
 import tempfile
 import unittest
 
-from nxs_XRD.nxs_export.XPAD_XRD_nxs_export import S140XRD, sort_extracted_by_sample
+from quixrd.nxs_export.XPAD_XRD_nxs_export import S140XRD, sort_extracted_by_sample
 
 
 class SortedExportSupportTest(unittest.TestCase):

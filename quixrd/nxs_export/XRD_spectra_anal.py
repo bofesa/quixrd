@@ -1,4 +1,4 @@
-from XRD_funcs import *
+﻿from XRD_funcs import *
 from XPAD_XRD_nxs_export import *
 
 from datetime import datetime
@@ -7,10 +7,12 @@ from pathlib import Path
 import re
 
 try:
-    from nxs_XRD.xrd_processing.peak_overlay import build_predicted_peaks, overlay_predicted_peaks
+    from quixrd.xrd_processing.peak_overlay import build_predicted_peaks, overlay_predicted_peaks
+    from quixrd.xrd_processing import twotheta_calibration as tth_cal
 except Exception:  # pragma: no cover - optional when running this file standalone
     build_predicted_peaks = None
     overlay_predicted_peaks = None
+    tth_cal = None
 
 class Spectrum():
     def __init__(self, directory: str):
@@ -33,6 +35,7 @@ class Spectrum():
         show_plot: bool = True,
         save_plot: bool = False,
         save_directory: str | None = None,
+        twotheta_calibration_json: str | None = None,
     ):
         """
         Plots the spectra for the specified scan numbers.
@@ -47,6 +50,7 @@ class Spectrum():
             show_plot (bool): whether to display the final plot interactively
             save_plot (bool): whether to save the final plot automatically
             save_directory (str): optional folder for automatic saved plots
+            twotheta_calibration_json: optional quixrd 2theta-axis calibration JSON applied in memory
         """
         if isinstance(scanNos, int):
             scanNos = [scanNos]
@@ -71,6 +75,12 @@ class Spectrum():
         cmap = plt.get_cmap('jet')
         norm = plt.Normalize(vmin=0, vmax=len(scanNos)-1)
         fig, ax = plt.subplots(figsize=(10, 6))
+
+        twotheta_calibration = None
+        if twotheta_calibration_json:
+            if tth_cal is None:
+                raise RuntimeError("2theta calibration helper is not available")
+            twotheta_calibration = tth_cal.load_calibration(twotheta_calibration_json)
 
         first_energy = None
         ask_flag = True  # Flag to determine if we should ask for scan type for unlabelled scans
@@ -117,15 +127,32 @@ class Spectrum():
                     idx = int(os.path.basename(fname).replace(froot, '').replace('.txt', '').split('_')[-1])
                     idxs.append(idx)
                     try:    # New files have only commented lines in the preamble and header, so try loading directly first
-                        data = np.loadtxt(fname, delimiter=" ")
+                        if tth_cal is not None:
+                            profile = tth_cal.read_txt_profile(fname)
+                            two_theta = profile["two_theta"]
+                            intensity = profile["intensity"]
+                            metadata = profile["metadata"]
+                        else:
+                            data = np.loadtxt(fname, delimiter=" ")
+                            two_theta = data[:, 0]
+                            intensity = data[:, 1]
+                            metadata = {}
                     except:
                         try:    # Legacy files had a string header line, so try skipping the first line if the above fails
                             data = np.loadtxt(fname, delimiter=" ", skiprows=1)
+                            two_theta = data[:, 0]
+                            intensity = data[:, 1]
+                            metadata = {}
                         except:
                             print(f"Could not load data from file {fname}. Skipping this file.")
                             continue
-                    two_theta = data[:, 0]
-                    intensity = data[:, 1]
+                    if twotheta_calibration is not None:
+                        two_theta, intensity, _applied = tth_cal.apply_calibration_to_profile(
+                            two_theta,
+                            intensity,
+                            twotheta_calibration,
+                            metadata=metadata,
+                        )
                     twothetas.append(two_theta)
                     intensities.append(intensity)
                     # Look for metadata in file preamble
@@ -202,7 +229,7 @@ class Spectrum():
                             continue  # Skip plotting additional chi scans if single_chi is True
                         ax.plot(two_theta, intensity + offset_value, '.-', color=cmap(norm(jdx)))
 
-                ax.set_xlabel('2$\\theta$ (°)')
+                ax.set_xlabel('2$\\theta$ (deg)')
                 ax.set_ylabel('Intensity (a.u.)')
                 ax.set_yticklabels([])
                 if len(scanNos) == 1:

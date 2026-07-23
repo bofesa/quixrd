@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import itertools
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -78,7 +79,15 @@ def _d_spacing(lattice_type, h, k, l, a, b=None, c=None):
 
 
 def _multiplicity(h, k, l):
-    return 1 + sum(value != 0 for value in (h, k, l))
+    reflections = set()
+    values = (int(h), int(k), int(l))
+    for perm in set(itertools.permutations(values)):
+        sign_options = []
+        for value in perm:
+            sign_options.append((0,) if value == 0 else (-abs(value), abs(value)))
+        for signed in itertools.product(*sign_options):
+            reflections.add(signed)
+    return len(reflections)
 
 
 def lattice_predicted_peaks(

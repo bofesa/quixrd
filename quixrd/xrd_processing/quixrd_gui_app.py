@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -17,13 +17,15 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 
-os.environ.setdefault("NXS_XRD_GUI_INTERACTIVE", "1")
+os.environ.setdefault("quixrd_GUI_INTERACTIVE", "1")
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from nxs_XRD.xrd_processing import sin2psi_processor as proc
+    from quixrd.xrd_processing import sin2psi_processor as proc
+    from quixrd.xrd_processing import twotheta_calibration as tth_cal
 else:
     from . import sin2psi_processor as proc
+    from . import twotheta_calibration as tth_cal
 
 NXS_EXPORT_DIR = Path(__file__).resolve().parents[1] / "nxs_export"
 if str(NXS_EXPORT_DIR) not in sys.path:
@@ -41,6 +43,7 @@ SPECTRA_LABEL_OPTIONS = (
 TAB_NAMES = ["Extraction", "Plotting", "Sorting", f"{SIN2PSI_LABEL} Analysis"]
 TAB_PREFIXES = {
     "Extraction": ("extract.",),
+    "Calibration": ("calibration.",),
     "Plotting": ("plot.",),
     "Sorting": ("sort.",),
     f"{SIN2PSI_LABEL} Analysis": ("sin2psi.",),
@@ -56,7 +59,7 @@ X_METADATA_OPTIONS = [
     "psi_deg",
     "sin2psi",
 ]
-APP_CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".config") / "nxs_XRD"
+APP_CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".config") / "quixrd"
 GUI_SETTINGS_PATH = APP_CONFIG_DIR / "gui_settings.json"
 DEFAULT_CACHE_ROOT = APP_CONFIG_DIR / "cache"
 
@@ -171,17 +174,22 @@ class XRDGuiApp(ttk.Frame):
         self.browse_kinds = {}
         self.widget_keys = {}
         self.help_window = None
+        self.calibration_window = None
         self.settings_path = GUI_SETTINGS_PATH
         self.settings = self._load_gui_settings()
         self.cache_root = Path(self.settings.get("cache_root") or DEFAULT_CACHE_ROOT)
         self.use_local_cache_var = tk.BooleanVar(value=self._use_local_cache_default())
+        self.apply_twotheta_calibration_var = tk.BooleanVar(
+            value=bool(self.settings.get("apply_twotheta_calibration", False))
+        )
+        self.twotheta_calibration_file = tk.StringVar(value=self.settings.get("twotheta_calibration_file", ""))
         self.status_var = tk.StringVar(value="Ready")
         self._syncing_energy_wavelength = False
         self._configure_master()
         self._build()
 
     def _configure_master(self):
-        self.master.title("nxs_XRD Workflow")
+        self.master.title("quixrd Workflow")
         self.master.geometry("1120x780")
         self.master.minsize(900, 620)
 
@@ -241,6 +249,18 @@ class XRDGuiApp(ttk.Frame):
         file_menu.add_command(label="Exit", command=self.master.destroy)
         self.menu_bar.add_cascade(label="File", menu=file_menu)
         self.file_menu = file_menu
+
+        calibration_menu = tk.Menu(self.menu_bar, tearoff=False)
+        calibration_menu.add_command(label="Run 2theta Calibration...", command=self.open_calibration_window)
+        calibration_menu.add_separator()
+        calibration_menu.add_command(label="Select 2theta Calibration File...", command=self.select_twotheta_calibration_file)
+        calibration_menu.add_checkbutton(
+            label="Apply 2theta Calibration by Default",
+            variable=self.apply_twotheta_calibration_var,
+            command=self._sync_twotheta_calibration_setting,
+        )
+        self.menu_bar.add_cascade(label="Calibration", menu=calibration_menu)
+        self.calibration_menu = calibration_menu
 
         help_menu = tk.Menu(self.menu_bar, tearoff=False)
         help_menu.add_command(label="Workflow Help", command=self.show_help)
@@ -427,7 +447,7 @@ class XRDGuiApp(ttk.Frame):
         widgets = [label_widget, frame]
         for idx, scan_type in enumerate(SPECTRA_SCAN_TYPES):
             key = f"plot.scan_type.{scan_type}"
-            var = tk.BooleanVar(value=scan_type == "chi")
+            var = tk.BooleanVar(value=(scan_type == "chi" or scan_type == "delta"))
             self.variables[key] = var
             check = ttk.Checkbutton(frame, text=scan_type, variable=var)
             check.grid(row=0, column=idx, sticky="w", padx=(0, 12))
@@ -519,6 +539,25 @@ class XRDGuiApp(ttk.Frame):
         self._set_enabled(["plot.predicted_c"], lattice_enabled and not cubic_like)
         self.set_status(f"Plot type: {mode}")
 
+    def _update_calibration_mode(self):
+        if "calibration.source_type" not in self.variables:
+            return
+        source_type = self.variables["calibration.source_type"].get()
+        material = self.variables["calibration.material"].get()
+        lattice_type = self.variables["calibration.lattice_type"].get()
+        is_lab6 = material.startswith("LaB6")
+        if is_lab6:
+            self._set_variable_value("calibration.lattice_type", "cubic")
+            self._set_variable_value("calibration.a", str(tth_cal.LAB6_A))
+            lattice_type = "cubic"
+        self._set_enabled(["calibration.flat_dir", "calibration.flat_scans"], source_type == "nxs")
+        self._set_enabled(["calibration.lattice_type", "calibration.a"], not is_lab6)
+        cubic_like = lattice_type in {"cubic", "fcc", "bcc"}
+        ac_like = lattice_type in {"hcp", "tetragonal"}
+        self._set_enabled(["calibration.b"], (not is_lab6) and not cubic_like and not ac_like)
+        self._set_enabled(["calibration.c"], (not is_lab6) and not cubic_like)
+        self.set_status(f"Calibration source: {source_type}")
+
     def _update_sort_mode(self):
         mode = self.variables["sort.mode"].get()
         self._set_enabled(["sort.sample_file", "sort.calibrations"], mode == "nxs")
@@ -583,6 +622,23 @@ class XRDGuiApp(ttk.Frame):
     def _browse(self, variable, browse, key=None):
         if browse == "directory":
             value = filedialog.askdirectory()
+        elif browse == "calibration_input":
+            source_type = self.variables.get("calibration.source_type")
+            source_type = source_type.get() if source_type is not None else "txt"
+            if source_type == "txt":
+                values = filedialog.askopenfilenames(
+                    title="Select calibration TXT frame files",
+                    filetypes=[("TXT files", "*.txt"), ("All files", "*.*")],
+                )
+                value = "; ".join(values)
+            else:
+                filetypes = [("CSV files", "*.csv"), ("All files", "*.*")]
+                if source_type == "nxs":
+                    filetypes = [("NXS files", "*.nxs"), ("All files", "*.*")]
+                value = filedialog.askopenfilename(
+                    title="Select calibration input file",
+                    filetypes=filetypes,
+                )
         else:
             value = filedialog.askopenfilename()
         if value:
@@ -903,7 +959,7 @@ class XRDGuiApp(ttk.Frame):
             tab_name = self._selected_tab_name()
             keys = self._keys_for_tab(tab_name)
             return {
-                "format": "nxs_XRD_gui_parameters",
+                "format": "quixrd_gui_parameters",
                 "version": 1,
                 "scope": "current_tab",
                 "tab": tab_name,
@@ -912,7 +968,7 @@ class XRDGuiApp(ttk.Frame):
             }
 
         return {
-            "format": "nxs_XRD_gui_parameters",
+            "format": "quixrd_gui_parameters",
             "version": 1,
             "scope": "all_tabs",
             "created_at": created_at,
@@ -1055,6 +1111,8 @@ class XRDGuiApp(ttk.Frame):
         self.settings_path.parent.mkdir(parents=True, exist_ok=True)
         self.settings["cache_root"] = str(self.cache_root)
         self.settings["use_local_cache"] = bool(self.use_local_cache_var.get())
+        self.settings["twotheta_calibration_file"] = self.twotheta_calibration_file.get()
+        self.settings["apply_twotheta_calibration"] = bool(self.apply_twotheta_calibration_var.get())
         self.settings_path.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
 
     def _cache_root(self):
@@ -1086,6 +1144,30 @@ class XRDGuiApp(ttk.Frame):
         self._save_gui_settings()
         state = "enabled" if self._use_local_cache() else "disabled"
         self.log(f"Local cache {state}.")
+
+    def _sync_twotheta_calibration_setting(self):
+        self._save_gui_settings()
+        state = "enabled" if self.apply_twotheta_calibration_var.get() else "disabled"
+        self.log(f"Default 2theta calibration application {state}.")
+
+    def select_twotheta_calibration_file(self):
+        initial = self.twotheta_calibration_file.get()
+        initial_dir = str(Path(initial).parent) if initial else str(Path.home())
+        value = filedialog.askopenfilename(
+            title="Select 2theta calibration JSON",
+            initialdir=initial_dir,
+            filetypes=[("Calibration JSON", "*.json"), ("All files", "*.*")],
+        )
+        if value:
+            self.twotheta_calibration_file.set(value)
+            self._save_gui_settings()
+            self.log(f"2theta calibration file selected: {value}")
+
+    def _twotheta_calibration_for_processing(self):
+        path = self.twotheta_calibration_file.get().strip()
+        if self.apply_twotheta_calibration_var.get() and path and Path(path).exists():
+            return path
+        return None
 
     def _cache_source_dir(self, source_dir):
         source_path = Path(source_dir)
@@ -1163,12 +1245,43 @@ class XRDGuiApp(ttk.Frame):
     def _refresh_dynamic_states(self):
         if "extract.mode" in self.variables:
             self._update_extraction_mode()
+        if "calibration.source_type" in self.variables:
+            self._update_calibration_mode()
         if "plot.type" in self.variables and "plot.fwhm_selector" in self.variables:
             self._update_plot_mode()
         if "sort.mode" in self.variables:
             self._update_sort_mode()
         if "sin2psi.action" in self.variables:
             self._update_sin2psi_mode()
+
+    def open_calibration_window(self):
+        if self.calibration_window is not None and self.calibration_window.winfo_exists():
+            self.calibration_window.lift()
+            self.calibration_window.focus_set()
+            self.set_status("2theta Calibration window is already open.")
+            return self.calibration_window
+
+        window = tk.Toplevel(self.master)
+        window.title("quixrd 2theta Calibration")
+        window.geometry("900x720")
+        window.minsize(760, 560)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(0, weight=1)
+        window.protocol("WM_DELETE_WINDOW", self._close_calibration_window)
+        self.calibration_window = window
+
+        scroller = ScrollableFrame(window)
+        scroller.grid(row=0, column=0, sticky="nsew")
+        self._build_calibration_tab(scroller.content)
+        self._update_calibration_mode()
+        self.log("Opened 2theta Calibration window.")
+        return window
+
+    def _close_calibration_window(self):
+        if self.calibration_window is not None and self.calibration_window.winfo_exists():
+            self.calibration_window.destroy()
+        self.calibration_window = None
+        self.set_status("2theta Calibration window closed.")
 
     def _xrd_exporter(self):
         from XPAD_XRD_nxs_export import S140XRD
@@ -1193,15 +1306,91 @@ class XRDGuiApp(ttk.Frame):
             mirror = self._bool("extract.mirror")
             if mode == "csv":
                 if len(scans) == 1:
-                    return exporter.extract_S140XRD(scans[0], showGraph=show_graph, saveGraph=save_graph, mirror_sorted_structure=mirror)
-                return exporter.batch_extract_S140XRD(scans, showGraph=show_graph, saveGraph=save_graph, mirror_sorted_structure=mirror)
+                    result = exporter.extract_S140XRD(scans[0], showGraph=show_graph, saveGraph=save_graph, mirror_sorted_structure=mirror)
+                else:
+                    result = exporter.batch_extract_S140XRD(scans, showGraph=show_graph, saveGraph=save_graph, mirror_sorted_structure=mirror)
+                calibration = self._twotheta_calibration_for_processing()
+                if calibration:
+                    correction = tth_cal.apply_calibration_to_exported_files(self._required_path("extract.export_dir", "Export directory"), calibration, scans=scans)
+                    return {"extraction": result, "twotheta_correction": correction}
+                return result
             if mode == "batch":
-                return exporter.batch_extract_S140XRD_chidelta(scans, showGraph=show_graph, saveGraph=save_graph, mirror_sorted_structure=mirror)
+                txt = exporter.batch_extract_S140XRD_chidelta(scans, showGraph=show_graph, saveGraph=save_graph, mirror_sorted_structure=mirror)
+                csv = exporter.batch_extract_S140XRD(scans, showGraph=show_graph, saveGraph=save_graph, mirror_sorted_structure=mirror)
+                result = {"txt_frames": txt, "combined_csv": csv}
+                calibration = self._twotheta_calibration_for_processing()
+                if calibration:
+                    result["twotheta_correction"] = tth_cal.apply_calibration_to_exported_files(self._required_path("extract.export_dir", "Export directory"), calibration, scans=scans)
+                return result
             if len(scans) == 1:
-                return exporter.extract_S140XRD_chidelta(scans[0], showGraph=show_graph, saveGraph=save_graph, mirror_sorted_structure=mirror)
-            return exporter.batch_extract_S140XRD_chidelta(scans, showGraph=show_graph, saveGraph=save_graph, mirror_sorted_structure=mirror)
+                result = exporter.extract_S140XRD_chidelta(scans[0], showGraph=show_graph, saveGraph=save_graph, mirror_sorted_structure=mirror)
+            else:
+                result = exporter.batch_extract_S140XRD_chidelta(scans, showGraph=show_graph, saveGraph=save_graph, mirror_sorted_structure=mirror)
+            calibration = self._twotheta_calibration_for_processing()
+            if calibration:
+                correction = tth_cal.apply_calibration_to_exported_files(self._required_path("extract.export_dir", "Export directory"), calibration, scans=scans)
+                return {"extraction": result, "twotheta_correction": correction}
+            return result
 
         self._run_task("Extraction", task, run_on_main=self._bool("extract.show_graph"))
+
+    def _calibration_input_paths(self):
+        text = self._required_path("calibration.input_paths", "Calibration input path(s)")
+        if ";" in text:
+            paths = [part.strip().strip('"') for part in text.split(";") if part.strip()]
+        else:
+            paths = [text]
+        return paths
+
+    def _apply_generated_calibration(self, result):
+        path = result.get("path") if isinstance(result, dict) else None
+        if not path:
+            return
+        self.twotheta_calibration_file.set(path)
+        self.apply_twotheta_calibration_var.set(True)
+        self._save_gui_settings()
+        self.log(f"2theta calibration selected and enabled: {path}")
+
+    def run_twotheta_calibration(self):
+        def task():
+            result = tth_cal.build_twotheta_calibration(
+                self._calibration_input_paths(),
+                source_type=self._get("calibration.source_type"),
+                output_dir=self._optional_path("calibration.output_dir"),
+                material=self._get("calibration.material"),
+                lattice_type=self._get("calibration.lattice_type"),
+                a=self._optional_float("calibration.a"),
+                b=self._optional_float("calibration.b"),
+                c=self._optional_float("calibration.c"),
+                energy=self._optional_float("calibration.energy"),
+                wavelength=self._optional_float("calibration.wavelength"),
+                polynomial_degree=self._optional_int("calibration.polynomial_degree") if self._get("calibration.polynomial_degree") else 2,
+                max_index=self._optional_int("calibration.max_index") or 8,
+                fit_window=self._optional_float("calibration.fit_window") or 0.35,
+                discard_outliers=self._bool("calibration.discard_outliers"),
+                show_plots=self._bool("calibration.show_plots"),
+                flat_file_directory=self._optional_path("calibration.flat_dir") or "./flat/",
+                flat_file_numbers=self._parse_int_list(self._get("calibration.flat_scans"), required=False),
+            )
+            print(f"Wrote: {result['path']}")
+            print(f"Wrote: {result['combined_txt']}")
+            print(f"Wrote: {result['combined_csv']}")
+            print(f"Wrote: {result['profile_plot']}")
+            print(f"Wrote: {result['fit_plot']}")
+            return result
+
+        self._run_task(
+            "2theta Calibration",
+            task,
+            on_success=lambda result: (self._apply_generated_calibration(result), self._log_result_paths(result)),
+            run_on_main=self._bool("calibration.show_plots"),
+        )
+
+    def extract_and_apply_twotheta_correction(self):
+        self.apply_twotheta_calibration_var.set(True)
+        self._save_gui_settings()
+        self.notebook.select(self.tab_frames["Extraction"])
+        self.log("2theta calibration application enabled. Switched to Extraction tab.")
 
     def run_sorting(self):
         mode = self._get("sort.mode")
@@ -1256,6 +1445,7 @@ class XRDGuiApp(ttk.Frame):
                     show_plot=show,
                     save_plot=save,
                     save_directory=str(self._manual_plot_save_dir()),
+                    twotheta_calibration_json=self._twotheta_calibration_for_processing(),
                 )
             if plot_type == "gradient":
                 return proc.plot_sin2psi_gradients(
@@ -1362,6 +1552,7 @@ class XRDGuiApp(ttk.Frame):
                 peak_center=self._optional_float("sin2psi.peak_center"),
                 track_peak=self._bool("sin2psi.track_peak"),
                 track_window=float(self._get("sin2psi.track_window") or 1.0),
+                twotheta_calibration_json=self._twotheta_calibration_for_processing(),
                 **self._stress_options(),
             )
             print(f"Wrote: {result['csv_path']}")
@@ -1426,7 +1617,17 @@ class XRDGuiApp(ttk.Frame):
 
     def _log_result_paths(self, result):
         if isinstance(result, dict):
-            for key in ("summary_path", "plot_path", "path", "csv_path", "scan_dir"):
+            for key in (
+                "summary_path",
+                "plot_path",
+                "path",
+                "csv_path",
+                "scan_dir",
+                "combined_txt",
+                "combined_csv",
+                "profile_plot",
+                "fit_plot",
+            ):
                 if result.get(key):
                     self.log(f"{key}: {result[key]}")
 
@@ -1498,6 +1699,59 @@ class XRDGuiApp(ttk.Frame):
         mode.trace_add("write", lambda *_: self._update_extraction_mode())
         self._update_extraction_mode()
         self._action_button(parent, 2, "Run Selected Extraction", command=self.run_extraction)
+
+    def _build_calibration_tab(self, parent):
+        inputs = self._section(parent, "2theta Calibration Inputs", 0)
+        source = self._radio_group(
+            inputs,
+            0,
+            "Source type",
+            "calibration.source_type",
+            [
+                ("txt", "TXT frames", "Use one or more exported I_vs_2th delta-frame TXT files."),
+                ("csv", "All-frame CSV", "Use one combined single-scan CSV export."),
+                ("nxs", "Raw NXS", "Export one SOLEIL XPAD delta-scan NXS file before calibration."),
+            ],
+            "txt",
+        )
+        self._entry(
+            inputs,
+            1,
+            "Input path(s)",
+            "calibration.input_paths",
+            "For TXT frames, Browse can select multiple files. For CSV/NXS, select one file.",
+            "calibration_input",
+            placeholder=r"C:\path\I_vs_2th_100_delta_0.txt; C:\path\I_vs_2th_100_delta_1.txt",
+        )
+        self._entry(inputs, 2, "Output folder", "calibration.output_dir", "Folder for calibration JSON, plots, and combined profile. Blank creates a calibration folder beside the input.", "directory", optional=True)
+        self._entry(inputs, 3, "Flat directory", "calibration.flat_dir", "Flat-field folder used only for raw NXS calibration input.", "directory", optional=True)
+        self._entry(inputs, 4, "Flat scan numbers", "calibration.flat_scans", "Flat scan numbers used only for raw NXS calibration input.", optional=True)
+
+        material = self._section(parent, "Material and Energy", 1)
+        self._combo(material, 0, "Calibration material", "calibration.material", ["LaB6 (cubic, Pm-3m)", "custom"], "Standard material used to calculate expected peak positions.", "LaB6 (cubic, Pm-3m)")
+        self._combo(material, 1, "Lattice type", "calibration.lattice_type", ["cubic", "fcc", "bcc", "hcp", "tetragonal", "orthorhombic"], "Lattice type for custom calibration material.", "cubic", optional=True)
+        self._entry(material, 2, "a", "calibration.a", "Lattice parameter a in Angstrom.", default=str(tth_cal.LAB6_A))
+        self._entry(material, 3, "b", "calibration.b", "Lattice parameter b in Angstrom where needed.", optional=True)
+        self._entry(material, 4, "c", "calibration.c", "Lattice parameter c in Angstrom where needed.", optional=True)
+        self._entry(material, 5, "Wavelength", "calibration.wavelength", "Wavelength in Angstrom. Leave blank to use energy metadata.", optional=True)
+        self._entry(material, 6, "Energy", "calibration.energy", "Energy in keV or eV. Leave blank to use scan metadata.", optional=True)
+
+        fitting = self._section(parent, "Fitting", 2)
+        self._entry(fitting, 0, "Polynomial degree", "calibration.polynomial_degree", "Degree for offset-vs-2theta polynomial; 0 is allowed.", default="2")
+        self._entry(fitting, 1, "Max hkl index", "calibration.max_index", "Maximum h/k/l index to enumerate.", default="8")
+        self._entry(fitting, 2, "Fit window", "calibration.fit_window", "Half-width in 2theta degrees around each predicted peak.", default="1.00")
+        self._checkbox(fitting, 3, "Discard fit outliers", "calibration.discard_outliers", "Conservatively exclude clear outlier peaks from the offset polynomial and Caglioti broadening fits. Excluded points are still plotted in cyan.", optional=True, default=False)
+        self._checkbox(fitting, 4, "Show plots", "calibration.show_plots", "Display generated calibration plots interactively.", optional=True, default=True)
+
+        source.trace_add("write", lambda *_: self._update_calibration_mode())
+        self.variables["calibration.material"].trace_add("write", lambda *_: self._update_calibration_mode())
+        self.variables["calibration.lattice_type"].trace_add("write", lambda *_: self._update_calibration_mode())
+        self._link_energy_wavelength_fields("calibration.wavelength", "calibration.energy")
+        self._update_calibration_mode()
+        buttons = ttk.Frame(parent)
+        buttons.grid(row=3, column=0, sticky="w", pady=(0, 10))
+        ttk.Button(buttons, text="Generate Calibration", command=self.run_twotheta_calibration).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(buttons, text="Extract with Correction", command=self.extract_and_apply_twotheta_correction).grid(row=0, column=1)
 
     def _build_plotting_tab(self, parent):
         options = self._section(parent, "Plot Inputs", 0)
@@ -1683,7 +1937,7 @@ class XRDGuiApp(ttk.Frame):
             return
 
         window = tk.Toplevel(self.master)
-        window.title("nxs_XRD Workflow Help")
+        window.title("quixrd Workflow Help")
         window.geometry("900x720")
         window.minsize(720, 520)
         window.columnconfigure(0, weight=1)
@@ -1726,7 +1980,7 @@ class XRDGuiApp(ttk.Frame):
         return [
             (
                 "Overview",
-                "nxs_XRD Workflow Help\n"
+                "quixrd Workflow Help\n"
                 "=====================\n\n"
                 "This GUI runs the XRD workflow tools for extraction, plotting, sorting, and sin2psi analysis. It also saves and "
                 "restores analysis setups through JSON parameter files.\n\n"
@@ -1767,6 +2021,30 @@ class XRDGuiApp(ttk.Frame):
                 "Clear Local Cache deletes the selected local cache folder after confirmation.\n",
             ),
             (
+                "Calibration",
+                "Calibration Menu\n"
+                "================\n\n"
+                "2theta Calibration opens a separate window for generating a 2theta-axis calibration from LaB6 or a custom lattice reference. "
+                "This is separate from the sin2psi chi/psi correction: 2theta calibration is applied before peak fitting.\n\n"
+                "Select 2theta Calibration File chooses a quixrd 2theta-axis calibration JSON. The GUI remembers the selected file "
+                "between sessions and uses it when calibration application is enabled.\n"
+                "Apply 2theta Calibration by Default applies the selected calibration during extraction post-processing, spectra plotting, "
+                "and sin2psi peak processing. Exported TXT files are marked with a TwoTheta Correction metadata line containing the "
+                "calibration JSON path. Files already carrying that metadata are treated as corrected and are not corrected again.\n\n"
+                "Calibration window inputs\n"
+                "-------------------------\n"
+                "Source type accepts raw SOLEIL XPAD NXS delta scans, exported TXT delta-frame files, or a single all-frame CSV export. "
+                "For TXT input, Browse opens a multi-file picker and stores paths separated by semicolons.\n"
+                "Output folder is where the calibration JSON, combined profile, and plots are written. If blank, quixrd creates a "
+                "calibration subfolder beside the selected input.\n"
+                "LaB6 autofills a cubic lattice with a = 4.25695 Angstrom. Custom lets you choose lattice type and lattice parameters.\n"
+                "Energy and wavelength are linked; if both are blank, quixrd tries to read energy from the input metadata.\n"
+                "Polynomial degree controls the fitted offset-vs-2theta curve. Degree 0 is allowed for a constant offset.\n"
+                "Generate Calibration writes the JSON, combined TXT/CSV profile, profile plot with predicted hkl/multiplicity labels, "
+                "and fit plot with the offset polynomial and Caglioti FWHM curve.\n"
+                "Extract and Apply Corrections enables default 2theta calibration application and switches to the Extraction tab.\n",
+            ),
+            (
                 "Extraction",
                 "Extraction\n"
                 "==========\n\n"
@@ -1778,7 +2056,7 @@ class XRDGuiApp(ttk.Frame):
                 "Extraction mode:\n"
                 "- TXT frames exports one I_vs_2th text file per frame. This is the usual input for sin2psi peak fitting.\n"
                 "- Combined CSV exports a scan-level CSV table instead of separate frame text files.\n"
-                "- Batch runs extraction over multiple scans or a scan range.\n\n"
+                "- Batch runs extraction over multiple scans or a scan range and writes both TXT frame files and combined CSV files.\n\n"
                 "Mirror sorted structure: Used for sample-sorted NXS trees. When enabled, exported files are written into matching sample "
                 "subfolders under the export directory.\n"
                 "Save graph: Saves extraction overview PNG files.\n"

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import sys
@@ -6,7 +6,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from nxs_XRD.xrd_processing import sin2psi_processor as proc
+    from quixrd.xrd_processing import sin2psi_processor as proc
 else:
     from . import sin2psi_processor as proc
 
@@ -23,6 +23,7 @@ AUTO_EXCLUDE = False
 AUTO_EXCLUDE_SIGMA = 3.0
 AUTO_EXCLUDE_MAX_ITER = 1
 CORRECTION_JSON = None  # Optional path, semicolon-separated paths, or list of correction JSON files
+TWOTHETA_CALIBRATION_JSON = None
 ELASTIC_E = None
 ELASTIC_NU = None
 STRESS_REFERENCE_TWO_THETA = None
@@ -67,6 +68,7 @@ def sin2psi_scans_fit(
     auto_exclude_sigma=_DEFAULT,
     auto_exclude_max_iter=_DEFAULT,
     correction_json=_DEFAULT,
+    twotheta_calibration_json=_DEFAULT,
     elastic_E=_DEFAULT,
     elastic_nu=_DEFAULT,
     stress_reference_two_theta=_DEFAULT,
@@ -76,7 +78,7 @@ def sin2psi_scans_fit(
     params_json=PARAMS_JSON,
 ):
     """
-    Fit sin²ψ data for a list of scans.
+    Fit sin2psi data for a list of scans.
     args:
         scans: list of scan numbers to process
         peak_center: center of the peak to track (as a 2theta value), if None, automatic fitting will be used
@@ -96,6 +98,7 @@ def sin2psi_scans_fit(
     auto_exclude_sigma = AUTO_EXCLUDE_SIGMA if auto_exclude_sigma is _DEFAULT else auto_exclude_sigma
     auto_exclude_max_iter = AUTO_EXCLUDE_MAX_ITER if auto_exclude_max_iter is _DEFAULT else auto_exclude_max_iter
     correction_json = CORRECTION_JSON if correction_json is _DEFAULT else correction_json
+    twotheta_calibration_json = TWOTHETA_CALIBRATION_JSON if twotheta_calibration_json is _DEFAULT else twotheta_calibration_json
     elastic_E = ELASTIC_E if elastic_E is _DEFAULT else elastic_E
     elastic_nu = ELASTIC_NU if elastic_nu is _DEFAULT else elastic_nu
     stress_reference_two_theta = STRESS_REFERENCE_TWO_THETA if stress_reference_two_theta is _DEFAULT else stress_reference_two_theta
@@ -134,6 +137,7 @@ def sin2psi_scans_fit(
             "auto_exclude_sigma": auto_exclude_sigma,
             "auto_exclude_max_iter": auto_exclude_max_iter,
             "correction_json": correction_json,
+            "twotheta_calibration_json": twotheta_calibration_json,
             "elastic_E": elastic_E,
             "elastic_nu": elastic_nu,
             "stress_reference_two_theta": stress_reference_two_theta,
@@ -160,6 +164,7 @@ def sin2psi_scans_fit(
                 auto_exclude_sigma=auto_exclude_sigma,
                 auto_exclude_max_iter=auto_exclude_max_iter,
                 correction_json=correction_json,
+                twotheta_calibration_json=twotheta_calibration_json,
                 plot_frames=PLOT_FRAMES,
                 force=True,
                 backup=BACKUP,

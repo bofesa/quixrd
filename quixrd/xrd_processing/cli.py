@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import logging
@@ -9,7 +9,7 @@ from typing import List, Optional
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from nxs_XRD.xrd_processing import sin2psi_processor as proc
+    from quixrd.xrd_processing import sin2psi_processor as proc
 else:
     from . import sin2psi_processor as proc
 

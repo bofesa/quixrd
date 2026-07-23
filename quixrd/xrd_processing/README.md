@@ -1,6 +1,6 @@
-# xrd_processing
+﻿# quixrd
 
-Python tool for fitting `I_vs_2th_*.txt` scans frame-by-frame and exporting:
+Quick XRD profile processing tools for exported 1D profiles, SOLEIL XPAD NXS export, plotting, 2theta calibration, and sin2psi analysis. The processing tools fit `I_vs_2th_*.txt` scans frame-by-frame and export:
 
 - per-frame fit PNGs
 - one per-scan CSV
@@ -18,19 +18,19 @@ The NXS/XPAD export functionality builds on SOLEIL XPAD-S140 export routines cre
 ## Usage
 
 ```powershell
-python -m nxs_XRD.xrd_processing.cli --data-dir "C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\export" --scan 1515 --plot-frames --force
+python -m quixrd.xrd_processing.cli --data-dir "C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\export" --scan 1515 --plot-frames --force
 ```
 
 Example exclusions:
 
 ```powershell
-python -m nxs_XRD.xrd_processing.cli --data-dir "C:\path\to\export" --scan 1515 --exclude "0,3,5"
+python -m quixrd.xrd_processing.cli --data-dir "C:\path\to\export" --scan 1515 --exclude "0,3,5"
 ```
 
 Example with an initial peak guess and frame-to-frame tracking:
 
 ```powershell
-python -m nxs_XRD.xrd_processing.cli --data-dir "C:\path\to\export" --scan 1515 --peak-center 43.2 --track-window 0.4
+python -m quixrd.xrd_processing.cli --data-dir "C:\path\to\export" --scan 1515 --peak-center 43.2 --track-window 0.4
 ```
 
 ## No-argument launcher
@@ -38,7 +38,7 @@ python -m nxs_XRD.xrd_processing.cli --data-dir "C:\path\to\export" --scan 1515 
 Run `run_workflow.py` directly to use the saved defaults:
 
 ```powershell
-python C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\nxs_XRD\xrd_processing\run_workflow.py
+python C:\Users\bosa\OneDrive - empa.ch\WFH\Synchrotron\quixrd\xrd_processing\run_workflow.py
 ```
 
 Edit the constants at the top of that file to change the data folder, scan number, exclusions, backup mode, or peak tracking settings.
@@ -48,16 +48,25 @@ Edit the constants at the top of that file to change the data folder, scan numbe
 Launch the Tkinter GUI with:
 
 ```powershell
-python -m nxs_XRD.xrd_processing.gui_app
+python -m quixrd.xrd_processing.quixrd_gui_app
 ```
 
 The GUI File menu includes parameter import/export and local-cache controls:
 
-- `Select Local Cache Folder...` chooses where cached input files are stored. The selection is saved between sessions in `%LOCALAPPDATA%\nxs_XRD\gui_settings.json`.
-- The default cache folder is `%LOCALAPPDATA%\nxs_XRD\cache`.
+- `Select Local Cache Folder...` chooses where cached input files are stored. The selection is saved between sessions in `%LOCALAPPDATA%\quixrd\gui_settings.json`.
+- The default cache folder is `%LOCALAPPDATA%\quixrd\cache`.
 - `Use Local Cache` in the File menu copies only the needed exported `I_vs_2th` TXT scan files into the cache on demand, then reads from the cached copies.
 - Output directories are not changed by caching, so processed results still go where the original output/data fields specify.
 - `Clear Local Cache` deletes the selected cache folder after confirmation.
+
+The GUI Calibration menu includes 2theta calibration controls:
+
+- `2theta Calibration...` opens the separate calibration window.
+- `Select 2theta Calibration File...` remembers a quixrd 2theta-axis calibration JSON between sessions.
+- `Apply 2theta Calibration by Default` applies that calibration during extraction post-processing, spectra plotting, and sin2psi peak processing.
+- Corrected TXT exports include `# TwoTheta Correction: <calibration_json_path>`. Files with a non-empty `TwoTheta Correction` metadata field are treated as already corrected.
+
+GUI Batch extraction writes both per-frame TXT files and all-frame CSV files for the selected scans.
 
 ## Outputs
 
@@ -79,7 +88,7 @@ The per-scan CSV includes fit-window metadata (`window_mode`, `seed_center`, `ba
 Processed scans can be summarized and plotted across scan number or metadata fields:
 
 ```python
-from nxs_XRD.xrd_processing import sin2psi_processor as proc
+from quixrd.xrd_processing import sin2psi_processor as proc
 
 proc.collect_sin2psi_summaries(r"C:\path\to\export")
 proc.plot_sin2psi_gradients(r"C:\path\to\export", x="scan_number")
@@ -133,12 +142,53 @@ Spectrum(directory=r"C:\path\to\export").plot_Ivs2theta(
 
 CIF parsing is not implemented in this pass; direct peak lists and built-in lattice formulas are supported.
 
+## 2theta Calibration
+
+LaB6 or custom lattice references can be used to generate a 2theta-axis calibration JSON. This correction is applied before peak fitting and is separate from sin2psi chi/psi correction.
+
+In the GUI, use `Calibration > 2theta Calibration...`. It accepts:
+
+- one SOLEIL XPAD NXS delta scan;
+- one or more exported TXT delta-frame files;
+- one all-frame CSV export.
+
+For LaB6, the GUI autofills cubic `a = 4.25695 Å`. The output folder receives:
+
+- a combined `I_vs_2th` TXT profile with metadata;
+- a combined CSV profile;
+- a profile plot with predicted hkl/multiplicity markers;
+- an offset-polynomial and Caglioti FWHM plot;
+- a calibration JSON that quixrd can apply later.
+
+Programmatically:
+
+```python
+from quixrd.xrd_processing import twotheta_calibration as cal
+
+result = cal.build_twotheta_calibration(
+    [r"C:\path\I_vs_2th_120_delta_0.txt", r"C:\path\I_vs_2th_120_delta_1.txt"],
+    source_type="txt",
+    output_dir=r"C:\path\calibration",
+    material="LaB6 (cubic, Pm-3m)",
+    wavelength=1.0,
+    polynomial_degree=2,
+)
+
+cal.apply_calibration_to_exported_files(
+    r"C:\path\to\export",
+    result["path"],
+    scans=[440, 441],
+)
+```
+
+When combining overlapping delta frames, quixrd interpolates onto a common 2theta grid and averages overlapping intensities.
+
 ## Refit Sin2psi Trends
 
 Existing peak fits can be reused while changing only the sin2psi regression exclusions:
 
 ```python
-from nxs_XRD.xrd_processing.run_workflow import refit_sin2psi_trends
+from quixrd.xrd_processing.run_workflow import refit_sin2psi_trends
 
 refit_sin2psi_trends(
     exclude_frames=[0, 1],
@@ -156,7 +206,7 @@ This reads each existing `scan_N_fits.csv`, rewrites `excluded_from_sin2psi`, an
 A stress-free reference scan can be used to generate a chi/psi correction curve:
 
 ```python
-from nxs_XRD.xrd_processing.run_workflow import generate_correction_curve
+from quixrd.xrd_processing.run_workflow import generate_correction_curve
 
 generate_correction_curve(r"C:\path\to\reference_export", reference_scan=120, degree=2)
 generate_correction_curve(

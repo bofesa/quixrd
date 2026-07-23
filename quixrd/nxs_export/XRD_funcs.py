@@ -1,4 +1,4 @@
-# NXS export helper functions credited to Pierre-Olivier Renault and the
+﻿# NXS export helper functions credited to Pierre-Olivier Renault and the
 # original SOLEIL XPAD-S140 NXS export-function authors; locally adapted here.
 
 import h5py, numpy, tables, os, time, math
@@ -69,7 +69,7 @@ def sort_nxs_by_sample(nxs_directory: str, sample_file: str, output_directory: s
         ydm_format : whether to look only for subfolders in yyyy-mm-dd format (True)
     Returns:
     """
-    from nxs_XRD.nxs_export.XPAD_XRD_nxs_export import nxs_fileName_root, nxs_fileName_suffix
+    from quixrd.nxs_export.XPAD_XRD_nxs_export import nxs_fileName_root, nxs_fileName_suffix
 
     try:
         if not os.path.exists(nxs_directory):

@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 import json
 import math
 import shutil
@@ -11,10 +11,11 @@ from unittest import mock
 import numpy as np
 import pandas as pd
 
-from nxs_XRD.xrd_processing import run_workflow
-from nxs_XRD.xrd_processing import gui_app
-from nxs_XRD.xrd_processing import peak_overlay
-from nxs_XRD.xrd_processing import sin2psi_processor as proc
+from quixrd.xrd_processing import run_workflow
+from quixrd.xrd_processing import quixrd_gui_app as gui_app
+from quixrd.xrd_processing import peak_overlay
+from quixrd.xrd_processing import sin2psi_processor as proc
+from quixrd.xrd_processing import twotheta_calibration as tth_cal
 
 
 class ProcessorSmokeTest(unittest.TestCase):
@@ -144,7 +145,7 @@ class ProcessorSmokeTest(unittest.TestCase):
         self.assertEqual([peak.label for peak in unique], ["a", "c"])
 
     def test_spectrum_plot_accepts_predicted_peak_overlay(self):
-        from nxs_XRD.nxs_export import XRD_spectra_anal
+        from quixrd.nxs_export import XRD_spectra_anal
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "I_vs_2th_1_chi_0.txt"
@@ -168,6 +169,219 @@ class ProcessorSmokeTest(unittest.TestCase):
                     predicted_peaks={"source": "list", "two_theta_list": "31.0 test"},
                 )
             XRD_spectra_anal.plt.close("all")
+
+    def test_twotheta_calibration_from_txt_frames_and_double_correction_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            wavelength = 1.0
+            peaks = peak_overlay.lattice_predicted_peaks(
+                "cubic",
+                tth_cal.LAB6_A,
+                wavelength=wavelength,
+                max_index=5,
+                min_two_theta=12,
+                max_two_theta=70,
+                phase_name="LaB6",
+            )[:5]
+            self.assertGreaterEqual(len(peaks), 3)
+
+            def offset(x):
+                return 0.02 + 0.0002 * x
+
+            def intensity_at(x):
+                y = np.full_like(x, 20.0, dtype=float)
+                for peak in peaks:
+                    observed = peak.two_theta + offset(peak.two_theta)
+                    y += 800.0 * np.exp(-0.5 * ((x - observed) / 0.035) ** 2)
+                return y
+
+            frame_paths = []
+            for idx, (low, high) in enumerate([(10.0, 43.0), (35.0, 75.0)]):
+                x = np.arange(low, high, 0.01)
+                y = intensity_at(x)
+                path = tmp_path / f"I_vs_2th_50_delta_{idx}.txt"
+                path.write_text(
+                    "\n".join(
+                        ["# Scan Type: ascan_delta", "# Energy: 12.3984193", "# 2theta intensity"]
+                        + [f"{xx:.5f} {yy:.6f}" for xx, yy in zip(x, y)]
+                    ),
+                    encoding="utf-8",
+                )
+                frame_paths.append(path)
+
+            result = tth_cal.build_twotheta_calibration(
+                frame_paths,
+                source_type="txt",
+                output_dir=tmp_path / "calibration_out",
+                wavelength=wavelength,
+                polynomial_degree=1,
+                show_plots=False,
+            )
+            calibration = tth_cal.load_calibration(result["path"])
+            self.assertTrue(Path(result["combined_txt"]).exists())
+            self.assertTrue(Path(result["combined_csv"]).exists())
+            self.assertTrue(Path(result["profile_plot"]).exists())
+            self.assertTrue(Path(result["profile_plot_svg"]).exists())
+            self.assertTrue(Path(result["fit_plot"]).exists())
+            self.assertTrue(Path(result["fit_plot_svg"]).exists())
+            self.assertEqual(calibration["material"], "LaB6 (cubic, Pm-3m)")
+            self.assertEqual(calibration["overlap_policy"], "blend")
+            self.assertGreaterEqual(sum(1 for peak in calibration["peaks"] if peak["usable"]), 3)
+            self.assertIn("caglioti", calibration)
+            estimated = np.polyval(calibration["offset_polynomial_coefficients"], [30.0])[0]
+            self.assertAlmostEqual(estimated, offset(30.0), delta=0.025)
+
+            corrected = tth_cal.apply_calibration_to_txt_file(frame_paths[0], result["path"])
+            self.assertTrue(corrected["applied"])
+            corrected_again = tth_cal.apply_calibration_to_txt_file(frame_paths[0], result["path"])
+            self.assertFalse(corrected_again["applied"])
+
+    def test_twotheta_calibration_shows_generated_figures_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            wavelength = 1.0
+            peaks = peak_overlay.lattice_predicted_peaks(
+                "cubic",
+                tth_cal.LAB6_A,
+                wavelength=wavelength,
+                max_index=5,
+                min_two_theta=12,
+                max_two_theta=70,
+                phase_name="LaB6",
+            )[:5]
+            x = np.arange(10.0, 75.0, 0.01)
+            y = np.full_like(x, 20.0, dtype=float)
+            for peak in peaks:
+                y += 800.0 * np.exp(-0.5 * ((x - peak.two_theta) / 0.035) ** 2)
+            path = tmp_path / "I_vs_2th_70_delta_0.txt"
+            path.write_text(
+                "\n".join(
+                    ["# Scan Type: ascan_delta", "# Energy: 12.3984193", "# 2theta intensity"]
+                    + [f"{xx:.5f} {yy:.6f}" for xx, yy in zip(x, y)]
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(tth_cal.plt, "show") as shown:
+                result = tth_cal.build_twotheta_calibration(
+                    [path],
+                    source_type="txt",
+                    output_dir=tmp_path / "shown",
+                    wavelength=wavelength,
+                    polynomial_degree=1,
+                    show_plots=True,
+                )
+
+            self.assertEqual(shown.call_count, 1)
+            self.assertTrue(Path(result["profile_plot"]).exists())
+            self.assertTrue(Path(result["fit_plot"]).exists())
+            tth_cal.plt.close("all")
+
+    def test_twotheta_calibration_from_single_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            x = np.arange(20.0, 45.0, 0.02)
+            y = 10 + 500 * np.exp(-0.5 * ((x - 30.02) / 0.04) ** 2)
+            csv_path = tmp_path / "scan_60_delta.csv"
+            pd.DataFrame(
+                {
+                    "frame_index": [0] * len(x),
+                    "2theta": x,
+                    "intensity": y,
+                    "energy": [12.3984193] * len(x),
+                }
+            ).to_csv(csv_path, index=False)
+            profiles = tth_cal.read_csv_profiles(csv_path)
+            self.assertEqual(len(profiles), 1)
+            combined = tth_cal.combine_profiles(profiles)
+            self.assertGreater(len(combined["two_theta"]), 100)
+
+    def test_calibration_peak_fit_seeds_large_offset_from_observed_peak(self):
+        x = np.arange(20.0, 30.0, 0.01)
+        expected = 24.0
+        observed = 25.05
+        y = 15.0 + 2000.0 * np.exp(-0.5 * ((x - observed) / 0.05) ** 2)
+
+        fit = tth_cal.fit_expected_peak(x, y, expected, window=2.0)
+
+        self.assertAlmostEqual(fit["observed_seed"], observed, delta=0.03)
+        self.assertAlmostEqual(fit["center"], observed, delta=0.03)
+
+        fitted, shift_summary = tth_cal.fit_calibration_peaks(
+            x,
+            y,
+            [peak_overlay.PredictedPeak(expected, "(100)", hkl=(1, 0, 0))],
+            fit_window=2.0,
+        )
+        self.assertAlmostEqual(shift_summary["initial_shift"], observed - expected, delta=0.03)
+        self.assertTrue(fitted[0]["usable"])
+        self.assertAlmostEqual(fitted[0]["offset"], observed - expected, delta=0.03)
+
+    def test_initial_shift_prefers_prominent_peak_when_expected_sits_between_peaks(self):
+        x = np.arange(20.0, 40.0, 0.01)
+        expected = 30.0
+        lower_peak = 29.55
+        higher_peak = 30.45
+        y = 10.0
+        y = y + 700.0 * np.exp(-0.5 * ((x - lower_peak) / 0.04) ** 2)
+        y = y + 1800.0 * np.exp(-0.5 * ((x - higher_peak) / 0.04) ** 2)
+        peaks = [peak_overlay.PredictedPeak(expected, "(111)", hkl=(1, 1, 1))]
+
+        shift, matches = tth_cal.estimate_initial_twotheta_shift(x, y, peaks, search_window=1.0)
+        fitted, _summary = tth_cal.fit_calibration_peaks(x, y, peaks, fit_window=0.5, initial_shift=shift)
+
+        self.assertAlmostEqual(matches[0]["observed_two_theta"], higher_peak, delta=0.03)
+        self.assertAlmostEqual(shift, higher_peak - expected, delta=0.03)
+        self.assertTrue(fitted[0]["usable"])
+        self.assertAlmostEqual(fitted[0]["center"], higher_peak, delta=0.03)
+
+    def test_calibration_assignment_uses_smooth_global_offset_and_skips_unmatched_lines(self):
+        x = np.arange(20.0, 70.0, 0.01)
+        expected = [25.0, 35.0, 45.0, 55.0, 65.0]
+        peaks = [peak_overlay.PredictedPeak(value, f"({idx})", hkl=(idx, 0, 0)) for idx, value in enumerate(expected)]
+        y = np.full_like(x, 10.0, dtype=float)
+        for value in expected[:-1]:
+            observed = value + 0.4 + 0.015 * value
+            y += 1500.0 * np.exp(-0.5 * ((x - observed) / 0.04) ** 2)
+        y += 1800.0 * np.exp(-0.5 * ((x - 64.4) / 0.04) ** 2)
+
+        fitted, summary = tth_cal.fit_calibration_peaks(x, y, peaks, fit_window=2.0)
+
+        usable = [peak for peak in fitted if peak.get("usable")]
+        self.assertEqual(len(usable), 4)
+        self.assertEqual(summary["observed_peak_count"], 5)
+        self.assertTrue(fitted[-1].get("error"))
+        for row in usable:
+            expected_offset = 0.4 + 0.015 * row["expected_two_theta"]
+            self.assertAlmostEqual(row["offset"], expected_offset, delta=0.03)
+
+    def test_calibration_outlier_exclusion_marks_points_without_hiding_them(self):
+        fitted = []
+        for idx, expected in enumerate(np.linspace(20.0, 90.0, 10)):
+            offset = 0.05 + 0.001 * expected
+            fwhm = 0.08 + 0.0004 * expected
+            if idx == 4:
+                offset += 0.45
+            if idx == 7:
+                fwhm = 0.65
+            fitted.append(
+                {
+                    "usable": True,
+                    "expected_two_theta": float(expected),
+                    "offset": float(offset),
+                    "center_err": 0.002,
+                    "fwhm": float(fwhm),
+                    "fwhm_err": 0.002,
+                }
+            )
+
+        summary = tth_cal.annotate_calibration_fit_outliers(fitted, polynomial_degree=1, discard_outliers=True)
+
+        self.assertTrue(summary["enabled"])
+        self.assertEqual(summary["offset_outliers"], 1)
+        self.assertEqual(summary["caglioti_outliers"], 1)
+        self.assertTrue(fitted[4]["offset_fit_outlier"])
+        self.assertTrue(fitted[7]["caglioti_fit_outlier"])
 
     def test_stress_with_reference_d0_and_equibiaxial_fallback(self):
         sin2psi = np.array([0.0, 0.25, 0.5, 0.75])
@@ -454,7 +668,7 @@ class ProcessorSmokeTest(unittest.TestCase):
         self.assertEqual(proc._scan_title(None, [101, 103]), "scans 101, 103")
 
     def test_selector_title_omits_chi_tolerance(self):
-        self.assertEqual(proc._selector_title("chi_5_0"), "chi=5.0°")
+        self.assertEqual(proc._selector_title("chi_5_0"), "chi=5.0\u00b0")
         self.assertEqual(proc._selector_title("frame_2"), "frame 2")
 
     def test_point_limited_y_axis_ignores_large_errorbars(self):
@@ -802,7 +1016,7 @@ class ProcessorSmokeTest(unittest.TestCase):
 
     def test_cli_module_import_path(self):
         completed = subprocess.run(
-            [sys.executable, "-m", "nxs_XRD.xrd_processing.cli", "--help"],
+            [sys.executable, "-m", "quixrd.xrd_processing.cli", "--help"],
             cwd=self.repo_root,
             text=True,
             capture_output=True,
@@ -824,6 +1038,7 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertNotIn("Help", tabs)
             self.assertTrue(hasattr(app, "menu_bar"))
             self.assertTrue(hasattr(app, "file_menu"))
+            self.assertTrue(hasattr(app, "calibration_menu"))
             self.assertTrue(hasattr(app, "help_menu"))
             self.assertTrue(hasattr(app, "log_text"))
             self.assertTrue(hasattr(app, "status_bar"))
@@ -835,6 +1050,14 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertIn("Select Local Cache Folder...", file_labels)
             self.assertIn("Use Local Cache", file_labels)
             self.assertNotIn("Create Local Cache", file_labels)
+            calibration_labels = [
+                app.calibration_menu.entrycget(idx, "label")
+                for idx in range(app.calibration_menu.index("end") + 1)
+                if app.calibration_menu.type(idx) in {"command", "checkbutton"}
+            ]
+            self.assertEqual(calibration_labels[0], "2theta Calibration...")
+            self.assertIn("Select 2theta Calibration File...", calibration_labels)
+            self.assertIn("Apply 2theta Calibration by Default", calibration_labels)
             for section_name in [
                 "sin2psi.inputs",
                 "sin2psi.peak_options",
@@ -846,7 +1069,7 @@ class ProcessorSmokeTest(unittest.TestCase):
             help_titles = [title for title, _text in app._help_sections()]
             self.assertEqual(
                 help_titles,
-                ["Overview", "File", "Extraction", "Plotting", "Sorting", gui_app.SIN2PSI_LABEL],
+                ["Overview", "File", "Calibration", "Extraction", "Plotting", "Sorting", gui_app.SIN2PSI_LABEL],
             )
 
             with tempfile.TemporaryDirectory() as tmp:
@@ -877,6 +1100,58 @@ class ProcessorSmokeTest(unittest.TestCase):
                 app._sync_use_local_cache_setting()
                 saved_settings = json.loads(settings_path.read_text(encoding="utf-8"))
                 self.assertTrue(saved_settings["use_local_cache"])
+                app.twotheta_calibration_file.set(str(Path(tmp) / "calibration.json"))
+                app.apply_twotheta_calibration_var.set(True)
+                app._sync_twotheta_calibration_setting()
+                saved_settings = json.loads(settings_path.read_text(encoding="utf-8"))
+                self.assertTrue(saved_settings["apply_twotheta_calibration"])
+                self.assertTrue(saved_settings["twotheta_calibration_file"].endswith("calibration.json"))
+
+            calibration_window = app.open_calibration_window()
+            self.assertTrue(calibration_window.winfo_exists())
+            self.assertIn("calibration.input_paths", app.variables)
+            self.assertEqual(app.open_calibration_window(), calibration_window)
+
+            app.variables["calibration.material"].set("LaB6 (cubic, Pm-3m)")
+            app._update_calibration_mode()
+            self.assertEqual(app.variables["calibration.a"].get(), str(tth_cal.LAB6_A))
+            self.assertEqual(app.widgets["calibration.b"][0].cget("state"), "disabled")
+            app.variables["calibration.material"].set("custom")
+            app.variables["calibration.lattice_type"].set("orthorhombic")
+            app._update_calibration_mode()
+            self.assertNotEqual(app.widgets["calibration.b"][0].cget("state"), "disabled")
+            self.assertNotEqual(app.widgets["calibration.c"][0].cget("state"), "disabled")
+
+            app.variables["calibration.source_type"].set("txt")
+            with mock.patch.object(gui_app.filedialog, "askopenfilenames", return_value=("a.txt", "b.txt")):
+                app._browse(app.variables["calibration.input_paths"], "calibration_input", "calibration.input_paths")
+            self.assertEqual(app.variables["calibration.input_paths"].get(), "a.txt; b.txt")
+
+            app.variables["calibration.source_type"].set("csv")
+            with mock.patch.object(gui_app.filedialog, "askopenfilename", return_value="single.csv"):
+                app._browse(app.variables["calibration.input_paths"], "calibration_input", "calibration.input_paths")
+            self.assertEqual(app.variables["calibration.input_paths"].get(), "single.csv")
+
+            with mock.patch.object(gui_app.tth_cal, "build_twotheta_calibration", return_value={"path": "calibration.json", "combined_txt": "combined.txt", "combined_csv": "combined.csv", "profile_plot": "profile.png", "fit_plot": "fit.png"}) as generated_calibration:
+                captured = {}
+
+                def immediate_run(title, func, on_success=None, run_on_main=False):
+                    captured["result"] = func()
+                    if on_success:
+                        on_success(captured["result"])
+
+                app._run_task = immediate_run
+                app.variables["calibration.source_type"].set("txt")
+                app.variables["calibration.input_paths"].set(str(Path(tmp) / "a.txt") + ";" + str(Path(tmp) / "b.txt"))
+                app.variables["calibration.output_dir"].set(str(Path(tmp) / "calibration"))
+                app.variables["calibration.wavelength"].set("1.0")
+                app.variables["calibration.discard_outliers"].set(True)
+                app.variables["calibration.show_plots"].set(False)
+                app.run_twotheta_calibration()
+                self.assertEqual(len(generated_calibration.call_args.args[0]), 2)
+                self.assertTrue(generated_calibration.call_args.kwargs["discard_outliers"])
+                self.assertEqual(app.twotheta_calibration_file.get(), "calibration.json")
+                self.assertTrue(app.apply_twotheta_calibration_var.get())
 
             app.variables["sin2psi.action"].set("process")
             app._update_sin2psi_mode()
