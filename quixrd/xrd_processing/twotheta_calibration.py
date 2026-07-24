@@ -731,7 +731,7 @@ def annotate_calibration_fit_outliers(fitted_peaks, polynomial_degree=2, discard
         y = np.asarray([peak["offset"] for peak in usable], dtype=float)
         coeffs = np.polyfit(x, y, min(degree, len(usable) - 1))
         residuals = y - np.polyval(coeffs, x)
-        outliers = _robust_outlier_mask(residuals, sigma=4.5, absolute_floor=0.08)
+        outliers = _robust_outlier_mask(residuals, sigma=3.8, absolute_floor=0.05)
         if outliers.sum() <= max(1, len(usable) // 4):
             for peak, residual, is_outlier in zip(usable, residuals, outliers):
                 peak["offset_fit_residual"] = float(residual)
@@ -743,16 +743,36 @@ def annotate_calibration_fit_outliers(fitted_peaks, polynomial_degree=2, discard
         median_fwhm = float(np.nanmedian(fwhm))
         fwhm_mad = float(np.nanmedian(np.abs(fwhm - median_fwhm)))
         fwhm_sigma = 1.4826 * fwhm_mad if np.isfinite(fwhm_mad) else 0.0
-        gross_threshold = max(4.5 * fwhm_sigma, 0.08, 1.5 * median_fwhm)
+        gross_threshold = max(3.5 * fwhm_sigma, 0.05, 0.9 * median_fwhm)
         gross_fwhm_outliers = (fwhm - median_fwhm) > gross_threshold
-        initial = fit_caglioti(caglioti_candidates)
+        initial = None
+        trial_keep = np.ones(len(caglioti_candidates), dtype=bool)
+        for _ in range(3):
+            trial_peaks = [peak for peak, keep in zip(caglioti_candidates, trial_keep) if keep]
+            if len(trial_peaks) < 3:
+                break
+            initial = fit_caglioti(trial_peaks)
+            if not initial:
+                break
+            x = np.asarray([peak["expected_two_theta"] for peak in caglioti_candidates], dtype=float)
+            theta = np.radians(x / 2.0)
+            predicted_sq = initial["U"] * np.tan(theta) ** 2 + initial["V"] * np.tan(theta) + initial["W"]
+            predicted = np.sqrt(np.maximum(predicted_sq, 0.0))
+            residuals = fwhm - predicted
+            trial_outliers = _robust_outlier_mask(residuals, sigma=3.2, absolute_floor=0.02) | gross_fwhm_outliers
+            if trial_outliers.sum() > max(2, len(caglioti_candidates) // 4):
+                break
+            new_keep = ~trial_outliers
+            if np.array_equal(new_keep, trial_keep):
+                break
+            trial_keep = new_keep
         if initial:
             x = np.asarray([peak["expected_two_theta"] for peak in caglioti_candidates], dtype=float)
             theta = np.radians(x / 2.0)
             predicted_sq = initial["U"] * np.tan(theta) ** 2 + initial["V"] * np.tan(theta) + initial["W"]
             predicted = np.sqrt(np.maximum(predicted_sq, 0.0))
             residuals = fwhm - predicted
-            outliers = _robust_outlier_mask(residuals, sigma=4.0, absolute_floor=0.03) | gross_fwhm_outliers
+            outliers = _robust_outlier_mask(residuals, sigma=3.2, absolute_floor=0.02) | gross_fwhm_outliers
             if outliers.sum() <= max(2, len(caglioti_candidates) // 4):
                 for peak, residual, is_outlier in zip(caglioti_candidates, residuals, outliers):
                     peak["caglioti_fit_residual"] = float(residual)
@@ -982,7 +1002,14 @@ def _plot_fit_curves(path, fitted_peaks, offset_coeffs, caglioti, title, show=Fa
         else:
             ax_offset.plot(x, offsets, ".", color="tab:blue", label="peak offsets")
         x_fit = np.linspace(float(np.min(x)), float(np.max(x)), 300)
-        ax_offset.plot(x_fit, np.polyval(offset_coeffs, x_fit), "-", linewidth=0.8, label="polynomial")
+        ax_offset.plot(
+            x_fit,
+            np.polyval(offset_coeffs, x_fit),
+            "-",
+            color="tab:orange",
+            linewidth=0.9,
+            label="polynomial",
+        )
     if offset_excluded:
         x_bad = np.asarray([peak["expected_two_theta"] for peak in offset_excluded], dtype=float)
         y_bad = np.asarray([peak["offset"] for peak in offset_excluded], dtype=float)
@@ -1021,7 +1048,14 @@ def _plot_fit_curves(path, fitted_peaks, offset_coeffs, caglioti, title, show=Fa
             x_fit = np.linspace(float(np.min(x)), float(np.max(x)), 300)
             theta = np.radians(x_fit / 2.0)
             y = caglioti["U"] * np.tan(theta) ** 2 + caglioti["V"] * np.tan(theta) + caglioti["W"]
-            ax_fwhm.plot(x_fit, np.sqrt(np.maximum(y, 0.0)), "-", linewidth=0.8, label="Caglioti")
+            ax_fwhm.plot(
+                x_fit,
+                np.sqrt(np.maximum(y, 0.0)),
+                "-",
+                color="tab:orange",
+                linewidth=0.9,
+                label="Caglioti",
+            )
     if caglioti_excluded:
         x_bad = np.asarray([peak["expected_two_theta"] for peak in caglioti_excluded], dtype=float)
         y_bad = np.asarray([peak["fwhm"] for peak in caglioti_excluded], dtype=float)

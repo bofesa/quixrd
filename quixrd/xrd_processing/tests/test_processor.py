@@ -15,6 +15,7 @@ from quixrd.xrd_processing import run_workflow
 from quixrd.xrd_processing import quixrd_gui_app as gui_app
 from quixrd.xrd_processing import peak_overlay
 from quixrd.xrd_processing import sin2psi_processor as proc
+from quixrd.xrd_processing import spinodal_peak_analysis as spinodal
 from quixrd.xrd_processing import twotheta_calibration as tth_cal
 
 
@@ -382,6 +383,201 @@ class ProcessorSmokeTest(unittest.TestCase):
         self.assertEqual(summary["caglioti_outliers"], 1)
         self.assertTrue(fitted[4]["offset_fit_outlier"])
         self.assertTrue(fitted[7]["caglioti_fit_outlier"])
+
+    def test_spinodal_two_peak_fit_and_series_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            x = np.linspace(39.0, 41.0, 401)
+            for scan, shift in [(10, 0.0), (11, 0.04)]:
+                y = (
+                    20.0
+                    + 900.0 * np.exp(-np.log(2.0) * ((x - (39.82 + shift)) / 0.08) ** 2)
+                    + 760.0 * np.exp(-np.log(2.0) * ((x - (40.18 + shift)) / 0.10) ** 2)
+                )
+                path = root / f"I_vs_2th_{scan}_chi_0.txt"
+                path.write_text(
+                    "\n".join(
+                        ["# Scan Type: ascan_chi", f"# Temperature: {300 + scan}", "# 2theta intensity"]
+                        + [f"{xx:.5f} {yy:.8f}" for xx, yy in zip(x, y)]
+                    ),
+                    encoding="utf-8",
+                )
+
+            profile = spinodal.read_txt_profile(root / "I_vs_2th_10_chi_0.txt")
+            fit = spinodal.fit_peak_models(
+                profile["two_theta"],
+                profile["intensity"],
+                peak_center=40.0,
+                fit_window=0.7,
+                fit_mode="compare",
+            )
+
+            self.assertTrue(fit["two_peak_preferred"])
+            self.assertGreater(fit["delta_bic"], 10.0)
+            self.assertAlmostEqual(fit["two"]["center_1"], 39.82, delta=0.03)
+            self.assertAlmostEqual(fit["two"]["center_2"], 40.18, delta=0.03)
+
+            messages = []
+            result = spinodal.run_peak_series(
+                root,
+                scans=[10, 11],
+                scan_type="chi",
+                frame_index=0,
+                peak_center=40.0,
+                fit_window=0.7,
+                fit_mode="compare",
+                diagnostic_all_fits=True,
+                show=False,
+                progress_callback=messages.append,
+            )
+            df = result["data"]
+            self.assertEqual(len(df), 2)
+            self.assertTrue(Path(result["csv_path"]).exists())
+            self.assertTrue(Path(result["plot_path"]).exists())
+            self.assertTrue(Path(result["diagnostic_plot_path"]).exists())
+            self.assertTrue(Path(result["diagnostic_plot_path"]).parent.name.startswith("diagnostics_"))
+            self.assertEqual(len(result["diagnostic_plot_paths"]), 2)
+            for diagnostic_path in result["diagnostic_plot_paths"]:
+                path = Path(diagnostic_path)
+                self.assertTrue(path.parent.name.startswith("diagnostics_"))
+                self.assertIn("_scan_", path.name)
+                self.assertTrue(path.exists())
+            saved_messages = [message for message in messages if "saved diagnostic" in message]
+            self.assertEqual(len(saved_messages), 2)
+            self.assertTrue((df["selected_model"] == "two").all())
+            self.assertNotIn("two_peak_preferred", df.columns)
+            self.assertIn("center_2", df.columns)
+            self.assertIn("minor_major_height_ratio", df.columns)
+
+            replot = spinodal.plot_peak_series_from_csv(result["csv_path"], x="temperature", save=True, show=False)
+            self.assertTrue(Path(replot["plot_path"]).exists())
+            self.assertEqual(replot["x"], "temperature")
+
+    def test_spinodal_two_peak_fit_finds_clear_shoulder(self):
+        x = np.linspace(28.5, 30.1, 450)
+        y = (
+            205.0
+            - 5.0 * (x - 29.3)
+            + 410.0 * np.exp(-np.log(2.0) * ((x - 29.06) / 0.20) ** 2)
+            + 170.0 * np.exp(-np.log(2.0) * ((x - 29.27) / 0.11) ** 2)
+        )
+
+        fit = spinodal.fit_peak_models(
+            x,
+            y,
+            peak_center=29.3,
+            fit_window=0.8,
+            fit_mode="compare",
+        )
+
+        self.assertTrue(fit["two_peak_preferred"])
+        self.assertGreater(fit["delta_bic"], 10.0)
+        self.assertGreaterEqual(fit["two"]["initial_guess_count"], 2)
+        self.assertGreater(fit["two"]["minor_major_height_ratio"], 0.1)
+        self.assertLessEqual(fit["two"]["minor_major_height_ratio"], 1.0)
+        self.assertAlmostEqual(fit["two"]["center_1"], 29.06, delta=0.04)
+        self.assertAlmostEqual(fit["two"]["center_2"], 29.27, delta=0.04)
+
+    def test_spinodal_delta_scans_are_homogenised_and_show_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            x1 = np.linspace(39.0, 40.2, 241)
+            x2 = np.linspace(39.8, 41.0, 241)
+            for idx, x in enumerate([x1, x2]):
+                y = 10.0 + 1000.0 * np.exp(-np.log(2.0) * ((x - 40.05) / 0.08) ** 2)
+                path = root / f"I_vs_2th_20_delta_{idx}.txt"
+                path.write_text(
+                    "\n".join(
+                        ["# Scan Type: ascan_delta", "# Temperature: 330", "# 2theta intensity"]
+                        + [f"{xx:.5f} {yy:.8f}" for xx, yy in zip(x, y)]
+                    ),
+                    encoding="utf-8",
+                )
+
+            combined = spinodal.load_scan_profile(root, 20, scan_type="delta", frame_index=None)
+            self.assertTrue(combined["metadata"]["homogenised_profile"])
+            self.assertEqual(combined["metadata"]["source_frame_count"], 2)
+
+            with mock.patch.object(spinodal.plt, "show") as shown:
+                messages = []
+                result = spinodal.run_peak_series(
+                    root,
+                    scans=[20],
+                    scan_type="delta",
+                    frame_index=None,
+                    peak_center=40.05,
+                    fit_window=0.4,
+                    fit_mode="single",
+                    show=True,
+                    progress_callback=messages.append,
+                )
+
+            shown.assert_called_once()
+            self.assertIn("Peak Analysis: fitting 1 scan(s)", messages)
+            self.assertTrue(any("scan 20 fitted" in message for message in messages))
+            self.assertTrue(any("finished (1 succeeded, 0 failed)" in message for message in messages))
+            df = result["data"]
+            self.assertTrue(pd.isna(df.loc[0, "frame_index"]))
+            self.assertTrue(df.loc[0, "homogenised_profile"])
+            self.assertNotIn("delta_bic", df.columns)
+            self.assertAlmostEqual(df.loc[0, "center_1"], 40.05, delta=0.03)
+            self.assertTrue(Path(result["diagnostic_plot_path"]).exists())
+            self.assertTrue(Path(result["diagnostic_plot_path"]).parent.name.startswith("diagnostics_"))
+
+    def test_spinodal_trend_panel_count_depends_on_comparison(self):
+        compare_df = pd.DataFrame(
+            {
+                "scan_number": [1, 2],
+                "start_time": ["2026-07-24T10:00:00", "2026-07-24T10:05:00"],
+                "center_1": [40.0, 40.1],
+                "fwhm_1": [0.1, 0.1],
+                "delta_bic": [12.0, 15.0],
+                "minor_major_height_ratio": [0.25, 0.4],
+                "selected_model": ["single", "two"],
+                "single_center_1": [40.0, 40.1],
+                "single_fwhm_1": [0.1, 0.1],
+                "two_center_1": [39.95, 40.05],
+                "two_center_2": [40.08, 40.18],
+                "two_fwhm_1": [0.08, 0.08],
+                "two_fwhm_2": [0.09, 0.09],
+            }
+        )
+        single_df = compare_df.drop(
+            columns=[
+                "delta_bic",
+                "minor_major_height_ratio",
+                "selected_model",
+                "single_center_1",
+                "single_fwhm_1",
+                "two_center_1",
+                "two_center_2",
+                "two_fwhm_1",
+                "two_fwhm_2",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            compare_fig = spinodal._plot_trends(Path(tmp) / "compare.png", compare_df, show=True)
+            time_fig = spinodal._plot_trends(Path(tmp) / "time.png", compare_df, x="start_time", show=True)
+            single_fig = spinodal._plot_trends(Path(tmp) / "single.png", single_df, show=True)
+            try:
+                self.assertEqual(len(compare_fig.axes), 4)
+                self.assertEqual(len(time_fig.axes), 4)
+                self.assertNotEqual(type(time_fig.axes[2].xaxis.get_major_locator()).__name__, "StrCategoryLocator")
+                self.assertEqual(len(single_fig.axes), 2)
+            finally:
+                spinodal.plt.close(compare_fig)
+                spinodal.plt.close(time_fig)
+                spinodal.plt.close(single_fig)
+
+    def test_spinodal_fit_downsamples_dense_windows_and_caps_optimizer(self):
+        x = np.linspace(39.0, 41.0, 5000)
+        y = 10.0 + 1000.0 * np.exp(-np.log(2.0) * ((x - 40.0) / 0.08) ** 2)
+
+        fit = spinodal.fit_peak_models(x, y, peak_center=40.0, fit_window=0.8, fit_mode="single")
+
+        self.assertEqual(fit["data_point_count"], 4000)
+        self.assertLessEqual(fit["fit_point_count"], spinodal.MAX_FIT_POINTS)
+        self.assertAlmostEqual(fit["single"]["center_1"], 40.0, delta=0.02)
 
     def test_stress_with_reference_d0_and_equibiaxial_fallback(self):
         sin2psi = np.array([0.0, 0.25, 0.5, 0.75])
@@ -1069,7 +1265,16 @@ class ProcessorSmokeTest(unittest.TestCase):
             help_titles = [title for title, _text in app._help_sections()]
             self.assertEqual(
                 help_titles,
-                ["Overview", "File", "Calibration", "Extraction", "Plotting", "Sorting", gui_app.SIN2PSI_LABEL],
+                [
+                    "Overview",
+                    "File",
+                    "Calibration",
+                    "Extraction",
+                    "Plotting",
+                    "Sorting",
+                    "Peak Analysis",
+                    gui_app.SIN2PSI_LABEL,
+                ],
             )
 
             with tempfile.TemporaryDirectory() as tmp:
@@ -1152,6 +1357,52 @@ class ProcessorSmokeTest(unittest.TestCase):
                 self.assertTrue(generated_calibration.call_args.kwargs["discard_outliers"])
                 self.assertEqual(app.twotheta_calibration_file.get(), "calibration.json")
                 self.assertTrue(app.apply_twotheta_calibration_var.get())
+
+            with mock.patch.object(gui_app.peak_analysis, "run_peak_series", return_value={"csv_path": "peaks.csv", "plot_path": "peaks.png"}) as peak_run:
+                app.variables["peak.data_dir"].set(str(Path(tmp)))
+                app.variables["peak.scans"].set("10-11")
+                app.variables["peak.scan_type"].set("delta")
+                app.variables["peak.frame_index"].set("0")
+                app.variables["peak.center"].set("40.0")
+                app.variables["peak.window"].set("0.7")
+                app.variables["peak.fit_mode"].set("compare")
+                app.variables["peak.show_final"].set(True)
+                app.variables["peak.diagnostic_all_fits"].set(True)
+                app._update_peak_mode()
+                self.assertFalse(app.widgets["peak.frame_index"][1].grid_info())
+                app.run_peak_analysis()
+                self.assertEqual(peak_run.call_args.kwargs["scans"], [10, 11])
+                self.assertIsNone(peak_run.call_args.kwargs["frame_index"])
+                self.assertEqual(peak_run.call_args.kwargs["peak_center"], 40.0)
+                self.assertEqual(peak_run.call_args.kwargs["fit_mode"], "compare")
+                self.assertTrue(peak_run.call_args.kwargs["show"])
+                self.assertTrue(peak_run.call_args.kwargs["diagnostic_all_fits"])
+                self.assertTrue(callable(peak_run.call_args.kwargs["progress_callback"]))
+
+                app.variables["peak.scan_type"].set("chi")
+                app._update_peak_mode()
+                self.assertTrue(app.widgets["peak.frame_index"][1].grid_info())
+                self.assertNotEqual(app.widgets["peak.frame_index"][1].cget("state"), "disabled")
+                app.run_peak_analysis()
+                self.assertEqual(peak_run.call_args.kwargs["frame_index"], 0)
+
+                app.variables["peak.scan_type"].set("omega")
+                app._update_peak_mode()
+                self.assertFalse(app.widgets["peak.frame_index"][1].grid_info())
+                app.run_peak_analysis()
+                self.assertIsNone(peak_run.call_args.kwargs["frame_index"])
+
+            with mock.patch.object(gui_app.peak_analysis, "plot_peak_series_from_csv", return_value={"csv_path": "peaks.csv", "plot_path": "replot.png"}) as peak_replot:
+                app.variables["peak.results_csv"].set(str(Path(tmp) / "peak_series.csv"))
+                app.variables["peak.x"].set("temperature")
+                app.variables["peak.show_final"].set(False)
+                app.replot_peak_analysis()
+                self.assertEqual(peak_replot.call_args.args[0], str(Path(tmp) / "peak_series.csv"))
+                self.assertEqual(peak_replot.call_args.kwargs["x"], "temperature")
+
+            help_text = app._help_text()
+            self.assertIn("Delta scans are homogenised automatically", help_text)
+            self.assertIn("comparison panel appears only", help_text)
 
             app.variables["sin2psi.action"].set("process")
             app._update_sin2psi_mode()

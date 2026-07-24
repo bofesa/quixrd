@@ -22,9 +22,11 @@ os.environ.setdefault("quixrd_GUI_INTERACTIVE", "1")
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from quixrd.xrd_processing import sin2psi_processor as proc
+    from quixrd.xrd_processing import spinodal_peak_analysis as peak_analysis
     from quixrd.xrd_processing import twotheta_calibration as tth_cal
 else:
     from . import sin2psi_processor as proc
+    from . import spinodal_peak_analysis as peak_analysis
     from . import twotheta_calibration as tth_cal
 
 NXS_EXPORT_DIR = Path(__file__).resolve().parents[1] / "nxs_export"
@@ -40,12 +42,13 @@ SPECTRA_LABEL_OPTIONS = (
     ("temp", "Temperature", "Add the first-frame temperature metadata to legend labels."),
     ("time", "Start time", "Add the first-frame start time metadata to legend labels."),
 )
-TAB_NAMES = ["Extraction", "Plotting", "Sorting", f"{SIN2PSI_LABEL} Analysis"]
+TAB_NAMES = ["Extraction", "Plotting", "Sorting", "Peak Analysis", f"{SIN2PSI_LABEL} Analysis"]
 TAB_PREFIXES = {
     "Extraction": ("extract.",),
     "Calibration": ("calibration.",),
     "Plotting": ("plot.",),
     "Sorting": ("sort.",),
+    "Peak Analysis": ("peak.",),
     f"{SIN2PSI_LABEL} Analysis": ("sin2psi.",),
 }
 
@@ -221,6 +224,7 @@ class XRDGuiApp(ttk.Frame):
         self._build_extraction_tab(self.tabs["Extraction"])
         self._build_plotting_tab(self.tabs["Plotting"])
         self._build_sorting_tab(self.tabs["Sorting"])
+        self._build_peak_analysis_tab(self.tabs["Peak Analysis"])
         self._build_sin2psi_tab(self.tabs[f"{SIN2PSI_LABEL} Analysis"])
         self._build_log_panel()
         self._build_status_bar()
@@ -564,6 +568,18 @@ class XRDGuiApp(ttk.Frame):
         self._set_enabled(["sort.export_dir", "sort.move"], mode == "extracted")
         self.set_status(f"Sort mode: {mode}")
 
+    def _update_peak_mode(self):
+        if "peak.scan_type" not in self.variables:
+            return
+        scan_type = self.variables["peak.scan_type"].get()
+        show_frame = scan_type == "chi"
+        self._set_widgets_visible(["peak.frame_index"], show_frame)
+        self._set_enabled(["peak.frame_index"], show_frame)
+        if scan_type == "delta":
+            self.set_status("Peak Analysis: delta scans use all frames")
+        else:
+            self.set_status(f"Peak Analysis scan type: {scan_type or 'all'}")
+
     def _update_sin2psi_mode(self):
         action = self.variables["sin2psi.action"].get()
         method = self.variables.get("sin2psi.correction_method")
@@ -859,6 +875,7 @@ class XRDGuiApp(ttk.Frame):
 
     def _run_task(self, title, func, on_success=None, run_on_main=False):
         self.log(f"{title}: started")
+        self.set_status(f"{title}: started")
         if run_on_main:
             stream = StringIO()
             try:
@@ -900,15 +917,17 @@ class XRDGuiApp(ttk.Frame):
         for line in output.splitlines():
             if line.strip():
                 self.log(line)
-        self.log(f"{title}: finished")
         if on_success:
             on_success(result)
+        self.log(f"{title}: finished")
+        self.set_status(f"{title}: finished")
 
     def _task_failed(self, title, exc, output, details):
         for line in output.splitlines():
             if line.strip():
                 self.log(line)
         self.log(f"{title}: failed - {exc}")
+        self.set_status(f"{title}: failed")
         messagebox.showerror(title, f"{exc}\n\nSee the command log for details.", parent=self.master)
         for line in details.splitlines()[-8:]:
             self.log(line)
@@ -1480,6 +1499,58 @@ class XRDGuiApp(ttk.Frame):
 
         self._run_task("Plotting", task, on_success=self._log_result_paths, run_on_main=plot_type == "spectra" or self._bool("plot.show_final"))
 
+    def run_peak_analysis(self):
+        def progress(message):
+            if threading.current_thread() is threading.main_thread():
+                self.log(message)
+                self.master.update_idletasks()
+            else:
+                self.master.after(0, lambda msg=message: self.log(msg))
+
+        def task():
+            data_dir = self._required_path("peak.data_dir", "Data directory")
+            scans = self._parse_int_list(self._get("peak.scans"), required=False) or None
+            scan_type = self._get("peak.scan_type") or None
+            return peak_analysis.run_peak_series(
+                data_dir=data_dir,
+                scans=scans,
+                scan_type=scan_type,
+                frame_index=(self._optional_int("peak.frame_index") if self._get("peak.frame_index") else 0) if scan_type == "chi" else None,
+                peak_center=self._optional_float("peak.center"),
+                fit_window=self._optional_float("peak.window") or 0.5,
+                fit_mode=self._get("peak.fit_mode"),
+                split_guess=self._optional_float("peak.split_guess"),
+                x=self._get("peak.x") or "scan_number",
+                save=True,
+                show=self._bool("peak.show_final"),
+                diagnostic_all_fits=self._bool("peak.diagnostic_all_fits"),
+                progress_callback=progress,
+            )
+
+        self._run_task(
+            "Peak Analysis",
+            task,
+            on_success=self._log_result_paths,
+            run_on_main=self._bool("peak.show_final"),
+        )
+
+    def replot_peak_analysis(self):
+        def task():
+            csv_path = self._required_path("peak.results_csv", "Peak Analysis results CSV")
+            return peak_analysis.plot_peak_series_from_csv(
+                csv_path,
+                x=self._get("peak.x") or "scan_number",
+                save=True,
+                show=self._bool("peak.show_final"),
+            )
+
+        self._run_task(
+            "Peak Analysis Replot",
+            task,
+            on_success=self._log_result_paths,
+            run_on_main=self._bool("peak.show_final"),
+        )
+
     def _manual_plot_save_dir(self):
         summary_csv = self._optional_path("plot.summary_csv")
         if summary_csv:
@@ -1620,8 +1691,10 @@ class XRDGuiApp(ttk.Frame):
             for key in (
                 "summary_path",
                 "plot_path",
+                "diagnostic_plot_path",
                 "path",
                 "csv_path",
+                "params_path",
                 "scan_dir",
                 "combined_txt",
                 "combined_csv",
@@ -1630,6 +1703,16 @@ class XRDGuiApp(ttk.Frame):
             ):
                 if result.get(key):
                     self.log(f"{key}: {result[key]}")
+            for key in ("success_count", "failed_count"):
+                if key in result:
+                    self.log(f"{key}: {result[key]}")
+            if result.get("diagnostic_plot_paths"):
+                paths = result["diagnostic_plot_paths"]
+                self.log(f"diagnostic_plot_files: {len(paths)}")
+                for path in paths[:5]:
+                    self.log(f"diagnostic_plot_file: {path}")
+                if len(paths) > 5:
+                    self.log(f"diagnostic_plot_file: ... {len(paths) - 5} more")
 
     def preview_sin2psi(self, command_name="Preview First Scan"):
         action = self._get("sin2psi.action")
@@ -1868,6 +1951,92 @@ class XRDGuiApp(ttk.Frame):
         self._update_sort_mode()
         self._action_button(parent, 1, "Run Selected Sorting", command=self.run_sorting)
 
+    def _build_peak_analysis_tab(self, parent):
+        inputs = self._section(parent, "Peak Analysis Inputs", 0)
+        self._entry(inputs, 0, "Data directory", "peak.data_dir", "Folder containing exported I_vs_2th TXT files.", "directory")
+        self._entry(
+            inputs,
+            1,
+            "Scan range/list",
+            "peak.scans",
+            "Leave blank to use all matching scans, or enter a scan, comma list, or range.",
+            optional=True,
+            placeholder="440-460 or 440,441,445",
+        )
+        self._combo(
+            inputs,
+            2,
+            "Scan type",
+            "peak.scan_type",
+            ["chi", "delta", "z", "omega", ""],
+            "Exported scan family to use. Leave blank if filenames do not include a scan type.",
+            "chi",
+            optional=True,
+        )
+        self._entry(inputs, 3, "Frame index", "peak.frame_index", "Frame file index to fit for every scan. Disabled for delta scans, which use all frames.", default="0")
+        self._combo(
+            inputs,
+            4,
+            "X/metadata field",
+            "peak.x",
+            X_METADATA_OPTIONS,
+            "Trend x-axis. scan_number is always available; metadata fields work when present in TXT headers.",
+            "scan_number",
+        )
+        self._entry(
+            inputs,
+            5,
+            "Existing results CSV",
+            "peak.results_csv",
+            "Saved peak_series CSV to replot on a different X/metadata field without refitting.",
+            "file",
+            optional=True,
+        )
+
+        fitting = self._section(parent, "One/Two-Peak Fit", 1)
+        self._entry(fitting, 0, "Peak center", "peak.center", "Approximate 2theta center of the peak or split-peak pair.")
+        self._entry(fitting, 1, "Fit window", "peak.window", "Half-width in 2theta degrees around Peak center.", default="0.5")
+        self._radio_group(
+            fitting,
+            2,
+            "Fit mode",
+            "peak.fit_mode",
+            [
+                ("compare", "Compare 1 vs 2", "Fit both one-peak and two-peak models and report delta BIC."),
+                ("single", "Single peak", "Fit only one pseudo-Voigt peak."),
+                ("two", "Two peaks", "Fit only two pseudo-Voigt peaks."),
+            ],
+            default="compare",
+        )
+        self._entry(
+            fitting,
+            3,
+            "Initial split",
+            "peak.split_guess",
+            "Optional initial separation between the two peak centers in degrees.",
+            optional=True,
+        )
+        self.variables["peak.scan_type"].trace_add("write", lambda *_: self._update_peak_mode())
+        self._update_peak_mode()
+        self._checkbox(fitting, 4, "Show final plot", "peak.show_final", "Display the first scan fit and trend plot interactively.", optional=True)
+        self._checkbox(
+            fitting,
+            5,
+            "Save every diagnostic plot",
+            "peak.diagnostic_all_fits",
+            "Save one diagnostic image for every successful scan. Each image shows only the final one-peak and/or two-peak fits.",
+            optional=True,
+            default=False,
+        )
+        buttons = ttk.Frame(parent)
+        buttons.grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        run_button = ttk.Button(buttons, text="Run Peak Analysis", command=self.run_peak_analysis)
+        run_button.grid(row=0, column=0, padx=(0, 8))
+        ToolTip(run_button, "Fit the selected peak across scans using the current settings.")
+        replot_button = ttk.Button(buttons, text="Replot Existing Results", command=self.replot_peak_analysis)
+        replot_button.grid(row=0, column=1, padx=(0, 8))
+        ToolTip(replot_button, "Read the Existing results CSV and replot it using the current X/metadata field.")
+
     def _build_sin2psi_tab(self, parent):
         inputs = self._named_section(parent, "sin2psi.inputs", "Inputs", 0)
         self._entry(inputs, 0, "Data directory", "sin2psi.data_dir", "Folder containing I_vs_2th files and/or sin2psi_export.", "directory")
@@ -1962,13 +2131,58 @@ class XRDGuiApp(ttk.Frame):
             scrollbar = ttk.Scrollbar(tab, orient="vertical", command=help_text.yview)
             scrollbar.grid(row=0, column=1, sticky="ns")
             help_text.configure(yscrollcommand=scrollbar.set)
-            help_text.insert("1.0", text)
+            self._render_help_text(help_text, text)
             help_text.configure(state="disabled")
             help_notebook.add(tab, text=title)
 
         close_button = ttk.Button(frame, text="Close", command=self._close_help)
         close_button.grid(row=1, column=0, sticky="e", pady=(8, 0))
         self.log("Opened Help.")
+
+    def _render_help_text(self, widget, text):
+        default_font = tkfont.nametofont("TkDefaultFont")
+        body_font = default_font.copy()
+        body_font.configure(size=max(default_font.cget("size"), 10))
+        title_font = body_font.copy()
+        title_font.configure(size=body_font.cget("size") + 4, weight="bold")
+        heading_font = body_font.copy()
+        heading_font.configure(size=body_font.cget("size") + 1, weight="bold")
+        bullet_font = body_font.copy()
+
+        widget.configure(
+            font=body_font,
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=10,
+            spacing1=2,
+            spacing2=2,
+            spacing3=8,
+            background=self.master.cget("background"),
+        )
+        widget.tag_configure("title", font=title_font, spacing3=12)
+        widget.tag_configure("heading", font=heading_font, spacing1=10, spacing3=6)
+        widget.tag_configure("body", font=body_font, lmargin1=0, lmargin2=0)
+        widget.tag_configure("bullet", font=bullet_font, lmargin1=16, lmargin2=34, spacing3=4)
+
+        lines = text.splitlines()
+        idx = 0
+        while idx < len(lines):
+            line = lines[idx]
+            next_line = lines[idx + 1] if idx + 1 < len(lines) else ""
+            if next_line and set(next_line) <= {"="}:
+                widget.insert("end", line + "\n", "title")
+                idx += 2
+                continue
+            if next_line and set(next_line) <= {"-"}:
+                widget.insert("end", line + "\n", "heading")
+                idx += 2
+                continue
+            if line.startswith("- "):
+                widget.insert("end", line + "\n", "bullet")
+            else:
+                widget.insert("end", line + "\n", "body")
+            idx += 1
 
     def _close_help(self):
         if self.help_window is not None and self.help_window.winfo_exists():
@@ -2040,6 +2254,13 @@ class XRDGuiApp(ttk.Frame):
                 "LaB6 autofills a cubic lattice with a = 4.25695 Angstrom. Custom lets you choose lattice type and lattice parameters.\n"
                 "Energy and wavelength are linked; if both are blank, quixrd tries to read energy from the input metadata.\n"
                 "Polynomial degree controls the fitted offset-vs-2theta curve. Degree 0 is allowed for a constant offset.\n"
+                "Discard fit outliers applies a conservative post-fit exclusion to the calibration fits. For the offset polynomial, "
+                "quixrd first fits the offset curve, calculates each peak's residual from that curve, and excludes only points whose "
+                "residual is large compared with the robust median absolute deviation and an absolute floor. For the Caglioti FWHM "
+                "curve, quixrd similarly checks FWHM residuals after iterative refitting and also catches clearly too-broad peaks. "
+                "At most a small fraction of peaks can be excluded automatically, so this is intended to remove obvious bad fits, "
+                "not to tune the calibration aggressively. Excluded points are still shown on the fit plot in cyan; blue points are "
+                "used in the fit and orange lines are the fitted polynomial/Caglioti models.\n"
                 "Generate Calibration writes the JSON, combined TXT/CSV profile, profile plot with predicted hkl/multiplicity labels, "
                 "and fit plot with the offset polynomial and Caglioti FWHM curve.\n"
                 "Extract and Apply Corrections enables default 2theta calibration application and switches to the Extraction tab.\n",
@@ -2112,6 +2333,42 @@ class XRDGuiApp(ttk.Frame):
                 "Calibration handling: Controls how calibration scans are handled when sorting NXS files.\n"
                 "Move extracted files: When off, sorting extracted data copies files. When on, it moves them, so use it only "
                 "when you are ready to modify the source export folder.\n",
+            ),
+            (
+                "Peak Analysis",
+                "Peak Analysis\n"
+                "=============\n\n"
+                "Use this tab to test whether a selected peak is better described by one peak or by two overlapping peaks, "
+                "for example during spinodal decomposition. It can also track peak center and FWHM across a series of scans.\n\n"
+                "Data directory: Folder containing exported I_vs_2th TXT frame files.\n"
+                "Scan range/list: Leave blank to fit all scans matching the selected scan type and frame index, or enter a scan, "
+                "comma list, or range.\n"
+                "Scan type: Selects the filename family such as chi or delta. Delta scans are homogenised automatically: all "
+                "I_vs_2th_<scan>_delta_<frame>.txt files are interpolated onto a common 2theta grid and overlapping regions are averaged.\n"
+                "Frame index: The frame file to fit in each scan. This is disabled for delta scans because all delta frames are combined.\n"
+                "X/metadata field: The trend x-axis. scan_number always works; temperature, energy, chi, and time fields work "
+                "when they are present in the TXT metadata.\n"
+                "Existing results CSV: A saved peak_series CSV. Use Replot Existing Results to change the x-axis without refitting.\n\n"
+                "One/two-peak fit:\n"
+                "- Peak center is the approximate 2theta location of the peak or split-peak pair.\n"
+                "- Fit window is the half-width around that center used for fitting.\n"
+                "- Compare 1 vs 2 fits both models. Single peak and Two peaks force only that model.\n"
+                "- Initial split is an optional starting separation for the two-peak fit. If blank, quixrd estimates starting "
+                "positions from local maxima or a small symmetric split.\n\n"
+                "Validity of two peaks:\n"
+                "The comparison uses delta BIC = BIC(single peak) - BIC(two peaks). Positive values favour two peaks; values "
+                "should be read alongside the fitted separation, relative peak intensity, and diagnostic plots rather than as a hard "
+                "threshold. BIC is the Bayesian Information Criterion: it compares fit quality while penalising extra fitted "
+                "parameters, so the two-peak model must improve the residuals enough to justify its added complexity. "
+                "The CSV stores selected_model as quixrd's assessment of which model is preferred. The trend plot shows the "
+                "one-peak fit in orange and the two-peak fit in green where available; non-selected model points are faded. "
+                "The delta BIC comparison panel also shows the minor/major peak-height ratio on a right-hand axis when two-peak results exist. The comparison panel "
+                "appears when Fit mode is Compare 1 vs 2, or when an existing CSV contains two-peak intensity ratios.\n\n"
+                "Diagnostics:\n"
+                "Each run saves one compact diagnostic plot with representative fits by default. It includes the first successful "
+                "scan, a median-comparison scan when delta BIC is available, and the worst-RMSE scan. Enable Save every diagnostic plot "
+                "to save one image for every successful scan so you can flick through them. These images show "
+                "only the final one-peak and/or two-peak model fits, not intermediate optimiser attempts.\n",
             ),
             (
                 f"{SIN2PSI_LABEL}",

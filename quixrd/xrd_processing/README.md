@@ -266,3 +266,40 @@ proc.plot_peak_position_trends(r"C:\path\to\export", x="temperature", frame_inde
 ```
 
 FWHM plots use `fwhm_err` as error bars when available. Peak-position plots use `peak_center_err` as error bars when available. Both helpers write timestamped summary CSV and PNG files under `sin2psi_export`.
+
+## Peak Analysis and Spinodal Splitting
+
+The GUI `Peak Analysis` tab can test whether one selected peak is better represented by one pseudo-Voigt peak or by two overlapping pseudo-Voigt peaks. It can also track the selected peak or peak pair across scans.
+
+For `delta` scans, leave the frame concept aside: quixrd combines all `I_vs_2th_<scan>_delta_<frame>.txt` frames into one homogenised profile by interpolating to a common 2theta grid and averaging overlapping regions. Other scan types use the selected exact frame index.
+
+Programmatically:
+
+```python
+from quixrd.xrd_processing import spinodal_peak_analysis as spinodal
+
+result = spinodal.run_peak_series(
+    r"C:\path\to\export",
+    scans=[440, 441, 442],
+    scan_type="chi",
+    frame_index=0,
+    peak_center=40.0,
+    fit_window=0.7,
+    fit_mode="compare",
+)
+```
+
+Outputs are written under `<data-dir>\peak_analysis`:
+
+- `peak_series_<timestamp>.csv`
+- `peak_series_trends_<timestamp>.png`
+- `peak_series_params_<timestamp>.json`
+- `diagnostics_<timestamp>\peak_series_diagnostics_<timestamp>.png`
+
+For comparison fits, `delta_bic = BIC(single peak) - BIC(two peaks)`. BIC is the Bayesian Information Criterion: it compares fit quality while penalising extra fitted parameters, so the two-peak model must improve the residuals enough to justify its added complexity. Positive values favour two peaks, but the magnitude should be read alongside the fitted separation, relative peak intensity, and diagnostic plots rather than as a hard threshold. The CSV stores `selected_model` as quixrd's assessment of which model is preferred. The trend plot shows both the one-peak fit in orange and the two-peak fit in green where available; non-selected model points are faded. The BIC panel also shows the minor/major peak-height ratio when two-peak results exist. The diagnostic plot shows representative scans by default. If every scan diagnostic is enabled, one image is saved per successful scan so you can flick through them; each image still shows only the final one-peak and/or two-peak model fits, not intermediate optimiser attempts.
+
+To replot an existing run on a different metadata x-axis without refitting, use the GUI `Existing results CSV` field or call:
+
+```python
+spinodal.plot_peak_series_from_csv(r"C:\path\to\peak_series_20260724_120000.csv", x="temperature")
+```
