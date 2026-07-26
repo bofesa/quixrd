@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="1024"
+   height="1024"
+   viewBox="0 0 1024 1024"
+   version="1.1"
+   id="svg6"
+   sodipodi:docname="quixrd_logo.svg"
+   inkscape:version="1.4.2 (f4327f4, 2025-05-13)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs6" />
+  <sodipodi:namedview
+     id="namedview6"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="0.41552734"
+     inkscape:cx="140.78496"
+     inkscape:cy="540.27732"
+     inkscape:window-width="1920"
+     inkscape:window-height="1111"
+     inkscape:window-x="-9"
+     inkscape:window-y="-9"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg6" />
+  <rect
+     x="0"
+     y="0"
+     width="1024"
+     height="1024"
+     rx="118"
+     ry="118"
+     fill="#F7F3EE"
+     id="rect1"
+     inkscape:export-filename="..\OneDrive - empa.ch\WFH\Synchrotron\quixrd\qx_128.png"
+     inkscape:export-xdpi="12"
+     inkscape:export-ydpi="12" />
+  <g
+     fill="none"
+     stroke-linecap="round"
+     stroke-linejoin="round"
+     stroke-width="14"
+     id="g5">
+    <!-- Top spectrum -->
+    <path
+       d="M138 286              C210 286 232 286 252 270              C267 258 271 224 286 224              C301 224 305 258 320 270              C348 292 404 292 438 270              C474 247 480 131 512 131              C544 131 550 247 586 270              C620 292 676 292 704 270              C719 258 723 224 738 224              C753 224 757 258 772 270              C792 286 814 286 886 286"
+       stroke="#0C2E57"
+       id="path1" />
+    <!-- Second spectrum -->
+    <path
+       d="M138 430              C210 430 232 430 252 414              C267 402 271 368 286 368              C301 368 305 402 320 414              C350 438 412 438 450 408              C480 384 486 288 520 288              C554 288 560 384 590 408              C628 438 690 438 720 414              C735 402 739 368 754 368              C769 368 773 402 788 414              C808 430 830 430 886 430"
+       stroke="#315F90"
+       id="path2" />
+    <!-- Third spectrum -->
+    <path
+       d="M138 574              C210 574 232 574 252 558              C267 546 271 512 286 512              C301 512 305 546 320 558              C350 582 420 582 458 550              C490 522 496 430 532 430              C568 430 574 522 606 550              C644 582 714 582 744 558              C759 546 763 512 778 512              C793 512 797 546 812 558              C832 574 850 574 886 574"
+       stroke="#167FB8"
+       id="path3" />
+    <!-- Fourth spectrum -->
+    <path
+       d="M138 718              C210 718 232 718 252 702              C267 690 271 656 286 656              C301 656 305 690 320 702              C350 726 426 726 466 692              C500 663 506 574 544 574              C582 574 588 663 622 692              C662 726 738 726 768 702              C783 690 787 656 802 656              C817 656 821 690 836 702              C856 718 870 718 886 718"
+       stroke="#67AFA5"
+       id="path4" />
+    <!-- Bottom spectrum with integrated x -->
+    <path
+       d="m 138,862 c 72,0 94,0 114,-16 15,-12 19,-46 34,-46 15,0 19,34 34,46 30,24 112,24 154,-12 34,-29 40,-118 78,-118 38,0 44,89 78,118 40,34 108,30 130,30 h 45.83784 c 14.08973,0 43.73661,-53.94983 60,-54.22797 m -60,0 c 17.57247,0 46.06133,54.22797 60,54.22797 H 886"
+       stroke="#e67e22"
+       id="path5"
+       sodipodi:nodetypes="cssscsccsccsc" />
+  </g>
+  <!-- Standalone q overlay -->
+  <g
+     fill="none"
+     stroke="#0c2e57"
+     stroke-width="14"
+     stroke-linecap="round"
+     stroke-linejoin="round"
+     id="g6"
+     transform="translate(0,-12.878067)">
+    <ellipse
+       cx="748"
+       cy="848"
+       rx="31"
+       ry="29"
+       id="ellipse5-9"
+       style="stroke-width:28;stroke-dasharray:none;stroke:#f7f3ee;stroke-opacity:1" />
+    <path
+       d="m 779,850 v 52"
+       id="path6-8"
+       sodipodi:nodetypes="cc"
+       style="stroke-width:28;stroke-dasharray:none;stroke:#f7f3ee;stroke-opacity:1" />
+    <ellipse
+       cx="748"
+       cy="848"
+       rx="31"
+       ry="29"
+       id="ellipse5" />
+    <path
+       d="m 779,850 v 52"
+       id="path6"
+       sodipodi:nodetypes="cc" />
+  </g>
+</svg>

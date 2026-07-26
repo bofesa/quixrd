@@ -15,6 +15,8 @@ archived at [https://doi.org/10.5281/zenodo.17349576](https://doi.org/10.5281/ze
 
 The NXS/XPAD export functionality builds on SOLEIL XPAD-S140 export routines credited to Pierre-Olivier Renault and the original NXS export-function authors, with local adaptations in this repository for sorted sample trees, metadata handling, and GUI/workflow integration.
 
+Parts of this program were developed with the assistance of AI coding tools, including OpenAI Codex/ChatGPT and GitHub Copilot. These tools were used to help draft, refactor, test, and document code under human direction and review. The scientific assumptions, workflow choices, validation, and responsibility for the final implementation remain with the project author.
+
 ## Usage
 
 ```powershell

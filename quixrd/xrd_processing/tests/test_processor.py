@@ -1238,6 +1238,8 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertTrue(hasattr(app, "help_menu"))
             self.assertTrue(hasattr(app, "log_text"))
             self.assertTrue(hasattr(app, "status_bar"))
+            self.assertTrue(gui_app.APP_ICON_PATH.exists())
+            self.assertTrue(app._apply_window_icon(root))
             file_labels = [
                 app.file_menu.entrycget(idx, "label")
                 for idx in range(app.file_menu.index("end") + 1)

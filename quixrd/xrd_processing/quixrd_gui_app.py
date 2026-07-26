@@ -65,6 +65,7 @@ X_METADATA_OPTIONS = [
 APP_CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".config") / "quixrd"
 GUI_SETTINGS_PATH = APP_CONFIG_DIR / "gui_settings.json"
 DEFAULT_CACHE_ROOT = APP_CONFIG_DIR / "cache"
+APP_ICON_PATH = Path(__file__).resolve().parents[1] / "qx.ico"
 
 
 class ToolTip:
@@ -193,8 +194,18 @@ class XRDGuiApp(ttk.Frame):
 
     def _configure_master(self):
         self.master.title("quixrd Workflow")
+        self._apply_window_icon(self.master)
         self.master.geometry("1120x780")
         self.master.minsize(900, 620)
+
+    def _apply_window_icon(self, window):
+        if not APP_ICON_PATH.exists():
+            return False
+        try:
+            window.iconbitmap(default=str(APP_ICON_PATH))
+            return True
+        except tk.TclError:
+            return False
 
     def _build(self):
         self.pack(fill="both", expand=True)
@@ -1282,6 +1293,7 @@ class XRDGuiApp(ttk.Frame):
 
         window = tk.Toplevel(self.master)
         window.title("quixrd 2theta Calibration")
+        self._apply_window_icon(window)
         window.geometry("900x720")
         window.minsize(760, 560)
         window.columnconfigure(0, weight=1)
@@ -2107,6 +2119,7 @@ class XRDGuiApp(ttk.Frame):
 
         window = tk.Toplevel(self.master)
         window.title("quixrd Workflow Help")
+        self._apply_window_icon(window)
         window.geometry("900x720")
         window.minsize(720, 520)
         window.columnconfigure(0, weight=1)
