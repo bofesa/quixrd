@@ -672,7 +672,7 @@ def _plot_trends(path, df, x="scan_number", show=False):
             labels.append("delta BIC")
         if ratio_column is not None:
             ratio_ax = comparison_ax.twinx() if has_comparison else comparison_ax
-            ratio_line = ratio_ax.plot(x_values, df[ratio_column], ".", markersize=TREND_MARKER_SIZE, color="tab:brown", label="minor/major height ratio")[0]
+            ratio_line = ratio_ax.plot(x_values, df[ratio_column], ".", markersize=TREND_MARKER_SIZE, color="tab:cyan", label="minor/major height ratio")[0]
             ratio_ax.set_ylabel("Relative intensity")
             ratio_ax.set_ylim(bottom=0.0)
             handles.append(ratio_line)

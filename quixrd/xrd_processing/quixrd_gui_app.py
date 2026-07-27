@@ -166,6 +166,32 @@ class ScrollableFrame(ttk.Frame):
         return "break"
 
 
+class GuiLogStream:
+    def __init__(self, emit):
+        self.emit = emit
+        self.capture = StringIO()
+        self._pending = ""
+
+    def write(self, text):
+        if not text:
+            return 0
+        self.capture.write(text)
+        self._pending += text
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            if line.strip():
+                self.emit(line)
+        return len(text)
+
+    def flush(self):
+        if self._pending.strip():
+            self.emit(self._pending)
+        self._pending = ""
+
+    def getvalue(self):
+        return self.capture.getvalue()
+
+
 class XRDGuiApp(ttk.Frame):
     def __init__(self, master):
         super().__init__(master, padding=10)
@@ -700,22 +726,49 @@ class XRDGuiApp(ttk.Frame):
     def _bool(self, key):
         return bool(self.variables[key].get())
 
+    def _parse_every_nth(self, text):
+        text = str(text or "").strip()
+        if not text.startswith(":") or text.count(":") != 1:
+            return None
+        step = int(text[1:].strip())
+        if step <= 0:
+            raise ValueError("Every-nth step must be greater than zero")
+        return step
+
+    def _apply_every_nth(self, scans, step):
+        if step is None or scans is None:
+            return scans
+        return list(scans)[::step]
+
     def _parse_int_list(self, text, required=False):
         text = str(text or "").strip()
         if not text:
             if required:
                 raise ValueError("A scan range/list is required")
             return []
+        if self._parse_every_nth(text) is not None:
+            if required:
+                raise ValueError("Use :n only where scans can be discovered automatically")
+            return []
         values = []
         for part in text.split(","):
             part = part.strip()
             if not part:
                 continue
+            step = None
+            if ":" in part:
+                part, step_text = [item.strip() for item in part.split(":", 1)]
+                step = abs(int(step_text))
+                if step == 0:
+                    raise ValueError("Range step must be greater than zero")
             if "-" in part:
                 start, end = [int(item.strip()) for item in part.split("-", 1)]
-                step = 1 if end >= start else -1
-                values.extend(range(start, end + step, step))
+                signed_step = step or 1
+                signed_step = signed_step if end >= start else -signed_step
+                values.extend(range(start, end + signed_step, signed_step))
             else:
+                if step is not None:
+                    raise ValueError("Step syntax is only valid with a range, e.g. 440-500:5")
                 values.append(int(part))
         return values
 
@@ -776,18 +829,22 @@ class XRDGuiApp(ttk.Frame):
 
     def _selected_sin2psi_scans(self, action=None):
         text = self._get("sin2psi.scans")
+        every_nth = self._parse_every_nth(text)
         if text:
-            scans = self._parse_int_list(text, required=True)
-            if not scans:
-                raise ValueError("At least one scan is required")
-            return scans
+            if every_nth is None:
+                scans = self._parse_int_list(text, required=True)
+                if not scans:
+                    raise ValueError("At least one scan is required")
+                return scans
 
-        if action in {"summaries", "correction"}:
-            return None if action == "summaries" else []
+        if action == "correction":
+            return []
+        if action == "summaries" and every_nth is None:
+            return None
 
         data_dir = self._required_path("sin2psi.data_dir", "Data directory")
         include_raw = action in (None, "process")
-        include_processed = action in (None, "refit")
+        include_processed = action in (None, "refit", "summaries")
         scans = proc.discover_scan_numbers(
             data_dir,
             include_raw=include_raw,
@@ -797,17 +854,27 @@ class XRDGuiApp(ttk.Frame):
             scans = proc.discover_scan_numbers(data_dir)
         if not scans:
             raise ValueError(f"No scans found in {data_dir}")
-        return scans
+        scans = self._apply_every_nth(scans, every_nth)
+        return scans if scans else None if action == "summaries" else scans
 
     def _selected_plot_scans(self, data_dir, plot_type):
-        scans = self._parse_int_list(self._get("plot.scans"), required=False)
+        text = self._get("plot.scans")
+        every_nth = self._parse_every_nth(text)
+        scans = self._parse_int_list(text, required=False)
         if scans:
             return scans
         if plot_type == "spectra":
             discovered = proc.discover_scan_numbers(data_dir, include_raw=True, include_processed=False)
             if not discovered:
                 raise ValueError(f"No exported spectra scans found in {data_dir}")
-            return discovered
+            return self._apply_every_nth(discovered, every_nth)
+        if every_nth is not None:
+            discovered = proc.discover_scan_numbers(data_dir, include_raw=False, include_processed=True)
+            if not discovered:
+                discovered = proc.discover_scan_numbers(data_dir)
+            if not discovered:
+                raise ValueError(f"No scans found in {data_dir}")
+            return self._apply_every_nth(discovered, every_nth)
         return None
 
     def _format_derived_float(self, value):
@@ -888,32 +955,41 @@ class XRDGuiApp(ttk.Frame):
         self.log(f"{title}: started")
         self.set_status(f"{title}: started")
         if run_on_main:
-            stream = StringIO()
+            stream = GuiLogStream(self._emit_task_log)
             try:
                 self._ensure_interactive_matplotlib()
                 with redirect_stdout(stream), redirect_stderr(stream):
                     result = func()
-                self._task_done(title, result, stream.getvalue(), on_success)
+                stream.flush()
+                self._task_done(title, result, "", on_success)
             except Exception as exc:
-                self._task_failed(title, exc, stream.getvalue(), traceback.format_exc())
+                stream.flush()
+                self._task_failed(title, exc, "", traceback.format_exc())
             return
 
         def worker():
-            stream = StringIO()
+            stream = GuiLogStream(self._emit_task_log)
             try:
                 with redirect_stdout(stream), redirect_stderr(stream):
                     result = func()
-                output = stream.getvalue()
-                self.master.after(0, lambda result=result, output=output: self._task_done(title, result, output, on_success))
+                stream.flush()
+                self.master.after(0, lambda result=result: self._task_done(title, result, "", on_success))
             except Exception as exc:
-                output = stream.getvalue()
+                stream.flush()
                 details = traceback.format_exc()
                 self.master.after(
                     0,
-                    lambda exc=exc, output=output, details=details: self._task_failed(title, exc, output, details),
+                    lambda exc=exc, details=details: self._task_failed(title, exc, "", details),
                 )
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _emit_task_log(self, message):
+        if threading.current_thread() is threading.main_thread():
+            self.log(message)
+            self.master.update_idletasks()
+        else:
+            self.master.after(0, lambda msg=message: self.log(msg))
 
     def _ensure_interactive_matplotlib(self):
         try:
@@ -1225,9 +1301,18 @@ class XRDGuiApp(ttk.Frame):
         return [unique[name] for name in sorted(unique)], missing_scans
 
     def _ensure_scan_txt_cache(self, data_dir, scans):
+        scan_count = len(scans) if scans is not None else 0
+        print(f"Local cache: checking source TXT files for {scan_count} scan(s)...", flush=True)
         source_paths, missing_scans = self._scan_txt_sources(data_dir, scans)
         cache_dir = self._cache_source_dir(data_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
+        pending_copy = [source for source in source_paths if not (cache_dir / source.name).exists()]
+        pending_reuse = len(source_paths) - len(pending_copy)
+        print(
+            f"Local cache: started - copying {len(pending_copy)} file(s), reusing {pending_reuse} existing file(s)"
+            f" in {cache_dir}",
+            flush=True,
+        )
         copied = 0
         reused = 0
         for source in source_paths:
@@ -1238,11 +1323,12 @@ class XRDGuiApp(ttk.Frame):
             shutil.copy2(source, target)
             copied += 1
         print(
-            f"Local cache: {copied} copied, {reused} reused"
-            f" for {len(source_paths)} scan file(s) in {cache_dir}"
+            f"Local cache: completed - {copied} copied, {reused} reused"
+            f" for {len(source_paths)} scan file(s) in {cache_dir}",
+            flush=True,
         )
         if missing_scans:
-            print(f"Local cache: no source TXT files found for scan(s): {missing_scans}")
+            print(f"Local cache: no source TXT files found for scan(s): {missing_scans}", flush=True)
         return {
             "cache_dir": str(cache_dir),
             "copied": copied,
@@ -1521,13 +1607,21 @@ class XRDGuiApp(ttk.Frame):
 
         def task():
             data_dir = self._required_path("peak.data_dir", "Data directory")
-            scans = self._parse_int_list(self._get("peak.scans"), required=False) or None
             scan_type = self._get("peak.scan_type") or None
+            frame_index = (self._optional_int("peak.frame_index") if self._get("peak.frame_index") else 0) if scan_type == "chi" else None
+            peak_scan_text = self._get("peak.scans")
+            every_nth = self._parse_every_nth(peak_scan_text)
+            scans = self._parse_int_list(peak_scan_text, required=False) or None
+            if every_nth is not None:
+                discovered = peak_analysis.discover_scan_numbers(data_dir, scan_type=scan_type, frame_index=frame_index)
+                if not discovered:
+                    raise ValueError(f"No Peak Analysis scans found in {data_dir}")
+                scans = self._apply_every_nth(discovered, every_nth)
             return peak_analysis.run_peak_series(
                 data_dir=data_dir,
                 scans=scans,
                 scan_type=scan_type,
-                frame_index=(self._optional_int("peak.frame_index") if self._get("peak.frame_index") else 0) if scan_type == "chi" else None,
+                frame_index=frame_index,
                 peak_center=self._optional_float("peak.center"),
                 fit_window=self._optional_float("peak.window") or 0.5,
                 fit_mode=self._get("peak.fit_mode"),
@@ -1784,8 +1878,8 @@ class XRDGuiApp(ttk.Frame):
             1,
             "Scan range/list",
             "extract.scans",
-            "Single scan, comma list, or range, e.g. 1515 or 1500-1520.",
-            placeholder="e.g. 1515,1517,1520 or 1500-1520",
+            "Single scan, comma list, range, or stepped range. Use 1500-1520:5 to take every fifth scan.",
+            placeholder="e.g. 1515,1517,1520 or 1500-1520:5",
         )
         self._entry(scans, 2, "Date range", "extract.date_range", "Date range used for date-folder NXS lookup, e.g. 20260609-20260615.", optional=True)
         self._checkbox(scans, 3, "Mirror sorted structure", "extract.mirror", "Mirror sample-sorted NXS folders in the export directory.", optional=True)
@@ -1856,9 +1950,9 @@ class XRDGuiApp(ttk.Frame):
             1,
             "Scan range/list",
             "plot.scans",
-            "Single scan, comma list, or range. Leave blank for all trend summaries.",
+            "Single scan, comma list, range, stepped range, or :n for every nth discovered scan.",
             optional=True,
-            placeholder="blank for all, or 440,441,443 / 440-450",
+            placeholder="blank for all, :5, or 440-500:5",
         )
         plot_type = self._radio_group(
             options,
@@ -1971,9 +2065,9 @@ class XRDGuiApp(ttk.Frame):
             1,
             "Scan range/list",
             "peak.scans",
-            "Leave blank to use all matching scans, or enter a scan, comma list, or range.",
+            "Leave blank to use all matching scans, or enter a scan, comma list, range, stepped range, or :n for every nth discovered scan.",
             optional=True,
-            placeholder="440-460 or 440,441,445",
+            placeholder=":5, 440-460:5, or 440,441,445",
         )
         self._combo(
             inputs,
@@ -2038,7 +2132,7 @@ class XRDGuiApp(ttk.Frame):
             "peak.diagnostic_all_fits",
             "Save one diagnostic image for every successful scan. Each image shows only the final one-peak and/or two-peak fits.",
             optional=True,
-            default=False,
+            default=True,
         )
         buttons = ttk.Frame(parent)
         buttons.grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
@@ -2057,8 +2151,8 @@ class XRDGuiApp(ttk.Frame):
             1,
             "Scan range/list",
             "sin2psi.scans",
-            "Single scan, comma list, or range.",
-            placeholder="e.g. 440,441,443 or 440-450",
+            "Single scan, comma list, range, stepped range, or :n for every nth discovered scan.",
+            placeholder="e.g. :5, 440,441,443 or 440-500:5",
         )
         action = self._radio_group(
             inputs,
@@ -2216,7 +2310,8 @@ class XRDGuiApp(ttk.Frame):
                 "- Optional field labels are shown in italics. Leave them blank to use the workflow default.\n"
                 "- Grey example text inside an empty box is only a hint; it is ignored until you type a real value.\n"
                 "- Greyed-out controls are not used by the selected mode or action.\n"
-                "- Scan range/list fields accept a single scan such as 440, a comma list such as 440,441,443, or a range such as 440-450.\n"
+                "- Scan range/list fields accept a single scan such as 440, a comma list such as 440,441,443, a range such as 440-450, "
+                "a stepped range such as 440-500:5, or :5 for every fifth discovered scan where automatic scan discovery is available.\n"
                 "- Browse buttons fill path fields with folders or files from the filesystem.\n"
                 "- Show graph / Show final plot means display the plot interactively. Saved plots can still be produced without showing them.\n"
                 "- The bottom command log records GUI actions. The status bar shows the most recent command or setting change.\n\n"
@@ -2303,7 +2398,7 @@ class XRDGuiApp(ttk.Frame):
                 "Use this tab for plotting already-extracted spectra and summary trends from existing analysis outputs.\n\n"
                 "Export/data directory: For spectra this is normally the export folder containing TXT/CSV files. For gradient, FWHM, "
                 "and peak-position trends this should be the folder containing sin2psi_export.\n"
-                "Scan range/list: Leave blank to include all available scans, or enter a single scan, comma list, or range.\n"
+                "Scan range/list: Leave blank to include all available scans, or enter a single scan, comma list, range, stepped range such as 440-500:5, or :5 for every fifth discovered scan.\n"
                 "Scan types: Check the exported scan families to include in spectra plots: chi, delta, z, or omega.\n"
                 "Legend labels: Choose which extra metadata are added to spectra legend entries. Scan number is always included.\n"
                 "Offset: Vertical spacing multiplier for spectra traces.\n"
@@ -2355,7 +2450,7 @@ class XRDGuiApp(ttk.Frame):
                 "for example during spinodal decomposition. It can also track peak center and FWHM across a series of scans.\n\n"
                 "Data directory: Folder containing exported I_vs_2th TXT frame files.\n"
                 "Scan range/list: Leave blank to fit all scans matching the selected scan type and frame index, or enter a scan, "
-                "comma list, or range.\n"
+                "comma list, range, stepped range such as 440-500:5, or :5 for every fifth discovered scan.\n"
                 "Scan type: Selects the filename family such as chi or delta. Delta scans are homogenised automatically: all "
                 "I_vs_2th_<scan>_delta_<frame>.txt files are interpolated onto a common 2theta grid and overlapping regions are averaged.\n"
                 "Frame index: The frame file to fit in each scan. This is disabled for delta scans because all delta frames are combined.\n"

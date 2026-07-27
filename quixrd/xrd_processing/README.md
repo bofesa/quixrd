@@ -13,7 +13,7 @@ The sin2psi analysis workflow implemented here is based on
 [`materialsguy/Bessy-II-KMC-II-insitu-sin2psi`](https://github.com/materialsguy/Bessy-II-KMC-II-insitu-sin2psi),
 archived at [https://doi.org/10.5281/zenodo.17349576](https://doi.org/10.5281/zenodo.17349576).
 
-The NXS/XPAD export functionality builds on SOLEIL XPAD-S140 export routines credited to Pierre-Olivier Renault and the original NXS export-function authors, with local adaptations in this repository for sorted sample trees, metadata handling, and GUI/workflow integration.
+The NXS/XPAD export functionality builds on XPAD-S140 export routines credited to Dr. Pierre-Olivier Renault and the original NXS export-function authors from the SOLEIL Diffabs beamline, with local adaptations in this repository for sorted sample trees, metadata handling, and GUI/workflow integration.
 
 Parts of this program were developed with the assistance of AI coding tools, including OpenAI Codex/ChatGPT and GitHub Copilot. These tools were used to help draft, refactor, test, and document code under human direction and review. The scientific assumptions, workflow choices, validation, and responsibility for the final implementation remain with the project author.
 

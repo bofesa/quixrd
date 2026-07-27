@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest import mock
 
 import numpy as np
@@ -1222,6 +1224,16 @@ class ProcessorSmokeTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("--peak-center", completed.stdout)
 
+    def test_gui_log_stream_emits_complete_lines(self):
+        emitted = []
+        stream = gui_app.GuiLogStream(emitted.append)
+        stream.write("Local cache: started")
+        self.assertEqual(emitted, [])
+        stream.write(" now\nLocal cache: completed")
+        self.assertEqual(emitted, ["Local cache: started now"])
+        stream.flush()
+        self.assertEqual(emitted[-1], "Local cache: completed")
+
     def test_gui_layout_import_and_tabs(self):
         try:
             root, app = gui_app.create_app()
@@ -1281,6 +1293,18 @@ class ProcessorSmokeTest(unittest.TestCase):
 
             with tempfile.TemporaryDirectory() as tmp:
                 params_path = Path(tmp) / "gui_params.json"
+                self.assertEqual(app._parse_int_list("440-450:5"), [440, 445, 450])
+                self.assertEqual(app._parse_int_list("450-440:5"), [450, 445, 440])
+                self.assertEqual(app._parse_int_list("440,450-460:5,470"), [440, 450, 455, 460, 470])
+                self.assertEqual(app._parse_every_nth(":5"), 5)
+                self.assertEqual(app._parse_int_list(":5"), [])
+                app.variables["plot.scans"].set(":2")
+                with mock.patch.object(gui_app.proc, "discover_scan_numbers", return_value=[100, 101, 102, 103, 104]):
+                    self.assertEqual(app._selected_plot_scans(str(Path(tmp)), "spectra"), [100, 102, 104])
+                with self.assertRaises(ValueError):
+                    app._parse_int_list("440-450:0")
+                with self.assertRaises(ValueError):
+                    app._parse_int_list("440:5")
                 app.variables["plot.x"].set("temperature")
                 app.variables["extract.scans"].set("440-450")
                 app.export_parameters(params_path, scope="all")
@@ -1389,10 +1413,13 @@ class ProcessorSmokeTest(unittest.TestCase):
                 self.assertEqual(peak_run.call_args.kwargs["frame_index"], 0)
 
                 app.variables["peak.scan_type"].set("omega")
+                app.variables["peak.scans"].set(":2")
                 app._update_peak_mode()
                 self.assertFalse(app.widgets["peak.frame_index"][1].grid_info())
-                app.run_peak_analysis()
+                with mock.patch.object(gui_app.peak_analysis, "discover_scan_numbers", return_value=[20, 21, 22, 23, 24]):
+                    app.run_peak_analysis()
                 self.assertIsNone(peak_run.call_args.kwargs["frame_index"])
+                self.assertEqual(peak_run.call_args.kwargs["scans"], [20, 22, 24])
 
             with mock.patch.object(gui_app.peak_analysis, "plot_peak_series_from_csv", return_value={"csv_path": "peaks.csv", "plot_path": "replot.png"}) as peak_replot:
                 app.variables["peak.results_csv"].set(str(Path(tmp) / "peak_series.csv"))
@@ -1517,14 +1544,23 @@ class ProcessorSmokeTest(unittest.TestCase):
                         encoding="utf-8",
                     )
                 Path(tmp, "I_vs_2th_999_chi_0.txt").write_text("30 1\n31 2", encoding="utf-8")
-                cache_info = app._ensure_scan_txt_cache(tmp, [101])
+                cache_output = StringIO()
+                with redirect_stdout(cache_output):
+                    cache_info = app._ensure_scan_txt_cache(tmp, [101])
                 self.assertEqual(cache_info["copied"], 1)
                 self.assertEqual(cache_info["reused"], 0)
+                self.assertIn("Local cache: checking source TXT files for 1 scan(s)", cache_output.getvalue())
+                self.assertIn("Local cache: started - copying 1 file(s)", cache_output.getvalue())
+                self.assertIn("Local cache: completed - 1 copied, 0 reused", cache_output.getvalue())
                 self.assertTrue((Path(cache_info["cache_dir"]) / "I_vs_2th_101_chi_0.txt").exists())
                 self.assertFalse((Path(cache_info["cache_dir"]) / "I_vs_2th_999_chi_0.txt").exists())
-                repeated_cache_info = app._ensure_scan_txt_cache(tmp, [101])
+                repeated_output = StringIO()
+                with redirect_stdout(repeated_output):
+                    repeated_cache_info = app._ensure_scan_txt_cache(tmp, [101])
                 self.assertEqual(repeated_cache_info["copied"], 0)
                 self.assertEqual(repeated_cache_info["reused"], 1)
+                self.assertIn("Local cache: started - copying 0 file(s), reusing 1 existing file(s)", repeated_output.getvalue())
+                self.assertIn("Local cache: completed - 0 copied, 1 reused", repeated_output.getvalue())
                 captured = {}
 
                 class DummySpectrum:
