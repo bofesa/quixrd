@@ -62,10 +62,29 @@ X_METADATA_OPTIONS = [
     "psi_deg",
     "sin2psi",
 ]
+PEAK_SECONDARY_Y_OPTIONS = [
+    "none",
+    "delta_bic",
+    "minor_major_height_ratio",
+    "two_minor_major_height_ratio",
+    "single_center_1",
+    "two_center_1",
+    "two_center_2",
+    "single_fwhm_1",
+    "two_fwhm_1",
+    "two_fwhm_2",
+    "temperature",
+    "energy",
+    "chi",
+    "frame_time",
+    "start_time",
+]
 APP_CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".config") / "quixrd"
 GUI_SETTINGS_PATH = APP_CONFIG_DIR / "gui_settings.json"
 DEFAULT_CACHE_ROOT = APP_CONFIG_DIR / "cache"
 APP_ICON_PATH = Path(__file__).resolve().parents[1] / "qx.ico"
+LARGE_CACHE_COPY_THRESHOLD = 100
+LARGE_FIT_SCAN_THRESHOLD = 50
 
 
 class ToolTip:
@@ -201,6 +220,7 @@ class XRDGuiApp(ttk.Frame):
         self.sections = {}
         self.placeholders = {}
         self.placeholder_active = {}
+        self.editable_combos = set()
         self.browse_kinds = {}
         self.widget_keys = {}
         self.help_window = None
@@ -215,6 +235,8 @@ class XRDGuiApp(ttk.Frame):
         self.twotheta_calibration_file = tk.StringVar(value=self.settings.get("twotheta_calibration_file", ""))
         self.status_var = tk.StringVar(value="Ready")
         self._syncing_energy_wavelength = False
+        self.cancel_event = threading.Event()
+        self.task_running = False
         self._configure_master()
         self._build()
 
@@ -408,15 +430,17 @@ class XRDGuiApp(ttk.Frame):
             ToolTip(check, tooltip)
         return check
 
-    def _combo(self, parent, row, label, key, values, tooltip="", default=None, optional=False):
+    def _combo(self, parent, row, label, key, values, tooltip="", default=None, optional=False, readonly=True):
         label_style = "Optional.TLabel" if optional else "TLabel"
         label_widget = ttk.Label(parent, text=label, style=label_style)
         label_widget.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         var = tk.StringVar(value=default or values[0])
         self.variables[key] = var
-        combo = ttk.Combobox(parent, textvariable=var, values=values, state="readonly")
+        combo = ttk.Combobox(parent, textvariable=var, values=values, state="readonly" if readonly else "normal")
         combo.grid(row=row, column=1, sticky="ew", pady=4)
         self.widgets[key] = [label_widget, combo]
+        if not readonly:
+            self.editable_combos.add(key)
         if tooltip:
             ToolTip(combo, tooltip)
         return combo
@@ -466,7 +490,7 @@ class XRDGuiApp(ttk.Frame):
             for widget in self.widgets.get(key, []):
                 try:
                     if isinstance(widget, ttk.Combobox):
-                        widget.configure(state="readonly" if enabled else "disabled")
+                        widget.configure(state=("normal" if key in self.editable_combos else "readonly") if enabled else "disabled")
                     else:
                         widget.configure(state=state)
                 except tk.TclError:
@@ -608,14 +632,33 @@ class XRDGuiApp(ttk.Frame):
     def _update_peak_mode(self):
         if "peak.scan_type" not in self.variables:
             return
+        action = self.variables.get("peak.action")
+        action_value = action.get() if action is not None else "run"
         scan_type = self.variables["peak.scan_type"].get()
         show_frame = scan_type == "chi"
+        if "peak.inputs" in self.sections:
+            if action_value == "run":
+                self.sections["peak.inputs"].grid()
+            else:
+                self.sections["peak.inputs"].grid_remove()
+        if "peak.replot" in self.sections:
+            if action_value == "replot":
+                self.sections["peak.replot"].grid()
+            else:
+                self.sections["peak.replot"].grid_remove()
+        if "peak.fit_options" in self.sections:
+            if action_value == "run":
+                self.sections["peak.fit_options"].grid()
+            else:
+                self.sections["peak.fit_options"].grid_remove()
         self._set_widgets_visible(["peak.frame_index"], show_frame)
         self._set_enabled(["peak.frame_index"], show_frame)
+        if hasattr(self, "peak_action_button"):
+            self.peak_action_button.configure(text="Run Peak Analysis" if action_value == "run" else "Replot Existing Results")
         if scan_type == "delta":
             self.set_status("Peak Analysis: delta scans use all frames")
         else:
-            self.set_status(f"Peak Analysis scan type: {scan_type or 'all'}")
+            self.set_status(f"Peak Analysis {'mode: replot' if action_value == 'replot' else 'scan type: ' + (scan_type or 'all')}")
 
     def _update_sin2psi_mode(self):
         action = self.variables["sin2psi.action"].get()
@@ -645,10 +688,12 @@ class XRDGuiApp(ttk.Frame):
             "sin2psi.correction_degree",
             "sin2psi.reference_two_theta",
         ]
+        summary_keys = ["sin2psi.summary_x", "sin2psi.summary_secondary_y"]
         self._set_section_visible("sin2psi.peak_options", action == "process")
         self._set_section_visible("sin2psi.exclusions", action in {"process", "refit", "correction"})
         self._set_section_visible("sin2psi.stress", action in {"process", "refit"})
         self._set_section_visible("sin2psi.calibration", action == "correction")
+        self._set_section_visible("sin2psi.summary", action == "summaries")
         self._set_widgets_visible(["sin2psi.correction_json"], action in {"process", "refit"})
         self._set_widgets_visible(["sin2psi.correction_degree"], action == "correction" and method_value == "polynomial")
         self._set_enabled(peak_keys, action == "process")
@@ -656,6 +701,7 @@ class XRDGuiApp(ttk.Frame):
         self._set_enabled(correction_apply_keys, action in {"process", "refit"})
         self._set_enabled(stress_keys, action in {"process", "refit"})
         self._set_enabled(calibration_keys, action == "correction")
+        self._set_enabled(summary_keys, action == "summaries")
         self._set_enabled(["sin2psi.correction_degree"], action == "correction" and method_value == "polynomial")
         self._set_enabled(["sin2psi.preview"], action in {"process", "refit"})
         self.set_status(f"{SIN2PSI_LABEL} action: {action}")
@@ -952,6 +998,11 @@ class XRDGuiApp(ttk.Frame):
         }
 
     def _run_task(self, title, func, on_success=None, run_on_main=False):
+        if self.task_running:
+            messagebox.showwarning(title, "Another task is already running. Cancel or wait for it to finish.", parent=self.master)
+            return
+        self.cancel_event.clear()
+        self._set_task_running(True)
         self.log(f"{title}: started")
         self.set_status(f"{title}: started")
         if run_on_main:
@@ -961,10 +1012,16 @@ class XRDGuiApp(ttk.Frame):
                 with redirect_stdout(stream), redirect_stderr(stream):
                     result = func()
                 stream.flush()
-                self._task_done(title, result, "", on_success)
+                if self.cancel_event.is_set():
+                    self._task_cancelled(title)
+                else:
+                    self._task_done(title, result, "", on_success)
             except Exception as exc:
                 stream.flush()
-                self._task_failed(title, exc, "", traceback.format_exc())
+                if self.cancel_event.is_set() and "cancel" in str(exc).lower():
+                    self._task_cancelled(title)
+                else:
+                    self._task_failed(title, exc, "", traceback.format_exc())
             return
 
         def worker():
@@ -973,13 +1030,13 @@ class XRDGuiApp(ttk.Frame):
                 with redirect_stdout(stream), redirect_stderr(stream):
                     result = func()
                 stream.flush()
-                self.master.after(0, lambda result=result: self._task_done(title, result, "", on_success))
+                self.master.after(0, lambda result=result: self._task_cancelled(title) if self.cancel_event.is_set() else self._task_done(title, result, "", on_success))
             except Exception as exc:
                 stream.flush()
                 details = traceback.format_exc()
                 self.master.after(
                     0,
-                    lambda exc=exc, details=details: self._task_failed(title, exc, "", details),
+                    lambda exc=exc, details=details: self._task_cancelled(title) if self.cancel_event.is_set() and "cancel" in str(exc).lower() else self._task_failed(title, exc, "", details),
                 )
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1008,6 +1065,8 @@ class XRDGuiApp(ttk.Frame):
             on_success(result)
         self.log(f"{title}: finished")
         self.set_status(f"{title}: finished")
+        self._set_task_running(False)
+        self.cancel_event.clear()
 
     def _task_failed(self, title, exc, output, details):
         for line in output.splitlines():
@@ -1015,9 +1074,17 @@ class XRDGuiApp(ttk.Frame):
                 self.log(line)
         self.log(f"{title}: failed - {exc}")
         self.set_status(f"{title}: failed")
+        self._set_task_running(False)
+        self.cancel_event.clear()
         messagebox.showerror(title, f"{exc}\n\nSee the command log for details.", parent=self.master)
         for line in details.splitlines()[-8:]:
             self.log(line)
+
+    def _task_cancelled(self, title):
+        self.log(f"{title}: cancelled")
+        self.set_status(f"{title}: cancelled")
+        self._set_task_running(False)
+        self.cancel_event.clear()
 
     def _selected_tab_name(self):
         selected = self.notebook.select()
@@ -1275,6 +1342,13 @@ class XRDGuiApp(ttk.Frame):
             return path
         return None
 
+    def _raise_if_cancelled(self):
+        if self.cancel_event.is_set():
+            raise RuntimeError("Task cancelled by user")
+
+    def _confirm_large_job(self, title, message):
+        return messagebox.askokcancel(title, message, parent=self.master)
+
     def _cache_source_dir(self, source_dir):
         source_path = Path(source_dir)
         try:
@@ -1316,6 +1390,7 @@ class XRDGuiApp(ttk.Frame):
         copied = 0
         reused = 0
         for source in source_paths:
+            self._raise_if_cancelled()
             target = cache_dir / source.name
             if target.exists():
                 reused += 1
@@ -1336,6 +1411,23 @@ class XRDGuiApp(ttk.Frame):
             "missing_scans": missing_scans,
             "source_count": len(source_paths),
         }
+
+    def _cache_copy_count(self, data_dir, scans):
+        source_paths, _missing_scans = self._scan_txt_sources(data_dir, scans)
+        cache_dir = self._cache_source_dir(data_dir)
+        return sum(1 for source in source_paths if not (cache_dir / source.name).exists()), len(source_paths)
+
+    def _confirm_cache_copy_if_large(self, data_dir, scans):
+        copy_count, source_count = self._cache_copy_count(data_dir, scans)
+        if copy_count <= LARGE_CACHE_COPY_THRESHOLD:
+            return True
+        return self._confirm_large_job(
+            "Large Local Cache Copy",
+            "This task will copy "
+            f"{copy_count} TXT file(s) into the local cache before analysis.\n\n"
+            f"{source_count} source TXT file(s) are needed in total. Existing cached files will be reused.\n\n"
+            "This can take a while on OneDrive or network folders. Continue?",
+        )
 
     def clear_local_cache(self):
         cache_root = self._cache_root()
@@ -1538,13 +1630,29 @@ class XRDGuiApp(ttk.Frame):
 
     def run_plotting(self):
         plot_type = self._get("plot.type")
+        preset_data_dir = None
+        preset_scans = None
+        if plot_type == "spectra" and self._use_local_cache():
+            self.log("Plotting: checking scan files and local cache...")
+            self.set_status("Plotting: checking scan files and local cache...")
+            self.master.update_idletasks()
+            preset_data_dir = self._required_path("plot.data_dir", "Export/data directory")
+            preset_scans = self._selected_plot_scans(preset_data_dir, plot_type)
+            self.log(f"Plotting: found {len(preset_scans)} scan(s); checking cache contents...")
+            self.master.update_idletasks()
+            if not self._confirm_cache_copy_if_large(preset_data_dir, preset_scans):
+                self.log("Plotting cancelled before local cache copy.")
+                self.set_status("Plotting: cancelled")
+                return
+            self.log("Plotting: preflight complete; starting plot task...")
+            self.master.update_idletasks()
 
         def task():
-            data_dir = self._required_path("plot.data_dir", "Export/data directory")
-            scans = self._selected_plot_scans(data_dir, plot_type)
             show = self._bool("plot.show_final")
             save = self._bool("plot.save_final")
             summary_csv = self._optional_path("plot.summary_csv")
+            data_dir = preset_data_dir or self._required_path("plot.data_dir", "Export/data directory")
+            scans = preset_scans if preset_scans is not None else self._selected_plot_scans(data_dir, plot_type)
             if plot_type == "spectra":
                 from XRD_spectra_anal import Spectrum
 
@@ -1597,6 +1705,12 @@ class XRDGuiApp(ttk.Frame):
 
         self._run_task("Plotting", task, on_success=self._log_result_paths, run_on_main=plot_type == "spectra" or self._bool("plot.show_final"))
 
+    def run_peak_action(self):
+        if self._get("peak.action") == "replot":
+            self.replot_peak_analysis()
+        else:
+            self.run_peak_analysis()
+
     def run_peak_analysis(self):
         def progress(message):
             if threading.current_thread() is threading.main_thread():
@@ -1605,56 +1719,116 @@ class XRDGuiApp(ttk.Frame):
             else:
                 self.master.after(0, lambda msg=message: self.log(msg))
 
-        def task():
+        def resolve_peak_scans():
             data_dir = self._required_path("peak.data_dir", "Data directory")
             scan_type = self._get("peak.scan_type") or None
             frame_index = (self._optional_int("peak.frame_index") if self._get("peak.frame_index") else 0) if scan_type == "chi" else None
             peak_scan_text = self._get("peak.scans")
             every_nth = self._parse_every_nth(peak_scan_text)
-            scans = self._parse_int_list(peak_scan_text, required=False) or None
-            if every_nth is not None:
-                discovered = peak_analysis.discover_scan_numbers(data_dir, scan_type=scan_type, frame_index=frame_index)
-                if not discovered:
-                    raise ValueError(f"No Peak Analysis scans found in {data_dir}")
+            explicit = self._parse_int_list(peak_scan_text, required=False)
+            discovered = peak_analysis.discover_scan_numbers(data_dir, scan_type=scan_type, frame_index=frame_index)
+            if explicit:
+                discovered_set = set(discovered)
+                scans = [scan for scan in explicit if scan in discovered_set]
+            else:
                 scans = self._apply_every_nth(discovered, every_nth)
+            if not scans:
+                raise ValueError(f"No matching Peak Analysis scans found in {data_dir}")
+            return data_dir, scan_type, frame_index, scans
+
+        try:
+            resolved_data_dir, resolved_scan_type, resolved_frame_index, resolved_scans = resolve_peak_scans()
+        except Exception as exc:
+            messagebox.showerror("Peak Analysis", str(exc), parent=self.master)
+            self.log(f"Peak Analysis setup failed: {exc}")
+            return
+
+        def task():
             return peak_analysis.run_peak_series(
-                data_dir=data_dir,
-                scans=scans,
-                scan_type=scan_type,
-                frame_index=frame_index,
+                data_dir=resolved_data_dir,
+                scans=resolved_scans,
+                scan_type=resolved_scan_type,
+                frame_index=resolved_frame_index,
                 peak_center=self._optional_float("peak.center"),
                 fit_window=self._optional_float("peak.window") or 0.5,
                 fit_mode=self._get("peak.fit_mode"),
                 split_guess=self._optional_float("peak.split_guess"),
                 x=self._get("peak.x") or "scan_number",
                 save=True,
-                show=self._bool("peak.show_final"),
+                show=False,
                 diagnostic_all_fits=self._bool("peak.diagnostic_all_fits"),
                 progress_callback=progress,
+                cancel_check=self.cancel_event.is_set,
+                secondary_y=self._get("peak.secondary_y"),
+                plot_mode=self._get("peak.fit_mode"),
             )
+
+        scan_count = len(resolved_scans)
+        if scan_count > LARGE_FIT_SCAN_THRESHOLD and not self._confirm_large_job(
+            "Large Peak Analysis Job",
+            f"Peak Analysis will fit {scan_count} scan(s).\n\n"
+            "This can take several minutes. You can use Cancel Task to stop between scans, but the current fit must finish first.\n\n"
+            "Continue?",
+        ):
+            self.log("Peak Analysis cancelled before fitting.")
+            return
+
+        def on_success(result):
+            self._log_result_paths(result)
+            if self._bool("peak.show_final") and isinstance(result, dict) and result.get("csv_path"):
+                self._show_peak_trend_from_csv(result["csv_path"])
 
         self._run_task(
             "Peak Analysis",
             task,
-            on_success=self._log_result_paths,
-            run_on_main=self._bool("peak.show_final"),
+            on_success=on_success,
+            run_on_main=False,
         )
 
+    def _show_peak_trend_from_csv(self, csv_path):
+        try:
+            self._ensure_interactive_matplotlib()
+            result = peak_analysis.plot_peak_series_from_csv(
+                csv_path,
+                x=self._get("peak.x") or "scan_number",
+                save=False,
+                show=True,
+                secondary_y=self._get("peak.secondary_y"),
+                plot_mode=self._get("peak.fit_mode"),
+            )
+            import matplotlib.pyplot as plt
+
+            plt.show(block=False)
+            if result.get("plot_path"):
+                self.log(f"Displayed Peak Analysis trend plot: {result['plot_path']}")
+            else:
+                self.log("Displayed Peak Analysis trend plot.")
+        except Exception as exc:
+            self.log(f"Could not display Peak Analysis trend plot: {exc}")
+
     def replot_peak_analysis(self):
+        csv_path = self._required_path("peak.results_csv", "Peak Analysis results CSV")
+
         def task():
-            csv_path = self._required_path("peak.results_csv", "Peak Analysis results CSV")
             return peak_analysis.plot_peak_series_from_csv(
                 csv_path,
                 x=self._get("peak.x") or "scan_number",
                 save=True,
-                show=self._bool("peak.show_final"),
+                show=False,
+                secondary_y=self._get("peak.secondary_y"),
+                plot_mode=self._get("peak.fit_mode"),
             )
+
+        def on_success(result):
+            self._log_result_paths(result)
+            if self._bool("peak.show_final"):
+                self._show_peak_trend_from_csv(csv_path)
 
         self._run_task(
             "Peak Analysis Replot",
             task,
-            on_success=self._log_result_paths,
-            run_on_main=self._bool("peak.show_final"),
+            on_success=on_success,
+            run_on_main=False,
         )
 
     def _manual_plot_save_dir(self):
@@ -1712,6 +1886,7 @@ class XRDGuiApp(ttk.Frame):
             cache_info = self._ensure_scan_txt_cache(source_dir, scans)
             read_dir = cache_info["cache_dir"]
         for scan in scans:
+            self._raise_if_cancelled()
             files = proc.discover_scan_files(read_dir, scan)
             if not files:
                 raise FileNotFoundError(f"No matching scan files found for scan {scan}")
@@ -1740,6 +1915,7 @@ class XRDGuiApp(ttk.Frame):
     def _refit_sin2psi_scans(self, common, scans):
         results = []
         for scan in scans:
+            self._raise_if_cancelled()
             result = proc.refit_sin2psi_from_csv(
                 common["data_dir"],
                 scan,
@@ -1757,6 +1933,31 @@ class XRDGuiApp(ttk.Frame):
 
     def run_sin2psi_action(self, scans_override=None):
         action = self._get("sin2psi.action")
+        try:
+            if scans_override is not None:
+                warning_scans = list(scans_override)
+            else:
+                warning_scans = self._selected_sin2psi_scans(action)
+            warning_count = len(warning_scans) if warning_scans is not None else 0
+            if action in {"process", "refit"} and warning_count > LARGE_FIT_SCAN_THRESHOLD:
+                if not self._confirm_large_job(
+                    f"Large {SIN2PSI_LABEL} Job",
+                    f"{SIN2PSI_LABEL} {action} will run on {warning_count} discovered scan(s).\n\n"
+                    "This can take several minutes. You can use Cancel Task to stop between scans, but the current scan must finish first.\n\n"
+                    "Continue?",
+                ):
+                    self.log(f"{SIN2PSI_LABEL} {action} cancelled before fitting.")
+                    return
+            if action == "process" and self._use_local_cache() and warning_scans:
+                data_dir = self._required_path("sin2psi.data_dir", "Data directory")
+                if not self._confirm_cache_copy_if_large(data_dir, warning_scans):
+                    self.log(f"{SIN2PSI_LABEL} process cancelled before local cache copy.")
+                    return
+        except Exception as exc:
+            if scans_override is None:
+                messagebox.showerror(f"{SIN2PSI_LABEL} {action}", str(exc), parent=self.master)
+                self.log(f"{SIN2PSI_LABEL} setup failed: {exc}")
+                return
 
         def task():
             common = self._sin2psi_common()
@@ -1780,7 +1981,13 @@ class XRDGuiApp(ttk.Frame):
                 print(f"Wrote: {result['plot_path']}")
                 return result
 
-            gradient = proc.plot_sin2psi_gradients(common["data_dir"], scans=scans, show=common["show"])
+            gradient = proc.plot_sin2psi_gradients(
+                common["data_dir"],
+                x=self._get("sin2psi.summary_x") or "scan_number",
+                scans=scans,
+                show=common["show"],
+                secondary_y=self._get("sin2psi.summary_secondary_y"),
+            )
             print(f"Wrote: {gradient['summary_path']}")
             print(f"Wrote: {gradient['plot_path']}")
             return gradient
@@ -2058,7 +2265,53 @@ class XRDGuiApp(ttk.Frame):
         self._action_button(parent, 1, "Run Selected Sorting", command=self.run_sorting)
 
     def _build_peak_analysis_tab(self, parent):
-        inputs = self._section(parent, "Peak Analysis Inputs", 0)
+        controls = self._section(parent, "Peak Analysis Mode", 0)
+        action = self._radio_group(
+            controls,
+            0,
+            "Action",
+            "peak.action",
+            [
+                ("run", "Run analysis", "Fit peak models from exported TXT files."),
+                ("replot", "Replot existing results", "Read a saved peak_series CSV and redraw the trend plot without refitting."),
+            ],
+            default="run",
+        )
+        self._radio_group(
+            controls,
+            1,
+            "Peak plot model",
+            "peak.fit_mode",
+            [
+                ("compare", "1 vs 2", "Fit/show both one-peak and two-peak models, including comparison metrics when available."),
+                ("single", "1 peak", "Fit/show only the one-peak model."),
+                ("two", "2 peaks", "Fit/show only the two-peak model."),
+            ],
+            default="compare",
+        )
+        self._combo(
+            controls,
+            2,
+            "X/metadata field",
+            "peak.x",
+            X_METADATA_OPTIONS,
+            "Trend x-axis. scan_number is always available; metadata fields work when present in TXT headers or the results CSV.",
+            "scan_number",
+        )
+        self._combo(
+            controls,
+            3,
+            "Second y-axis",
+            "peak.secondary_y",
+            PEAK_SECONDARY_Y_OPTIONS,
+            "Optional right-hand y-axis for Peak Analysis trend plots. You can type any numeric column in the peak_series CSV.",
+            "none",
+            optional=True,
+            readonly=False,
+        )
+        self._checkbox(controls, 4, "Show final plot", "peak.show_final", "Display only the final trend plot interactively. Diagnostic plots are saved but not opened.", optional=True)
+
+        inputs = self._named_section(parent, "peak.inputs", "Peak Analysis Inputs", 1)
         self._entry(inputs, 0, "Data directory", "peak.data_dir", "Folder containing exported I_vs_2th TXT files.", "directory")
         self._entry(
             inputs,
@@ -2080,18 +2333,11 @@ class XRDGuiApp(ttk.Frame):
             optional=True,
         )
         self._entry(inputs, 3, "Frame index", "peak.frame_index", "Frame file index to fit for every scan. Disabled for delta scans, which use all frames.", default="0")
-        self._combo(
-            inputs,
-            4,
-            "X/metadata field",
-            "peak.x",
-            X_METADATA_OPTIONS,
-            "Trend x-axis. scan_number is always available; metadata fields work when present in TXT headers.",
-            "scan_number",
-        )
+
+        replot = self._named_section(parent, "peak.replot", "Existing Results", 2)
         self._entry(
-            inputs,
-            5,
+            replot,
+            0,
             "Existing results CSV",
             "peak.results_csv",
             "Saved peak_series CSV to replot on a different X/metadata field without refitting.",
@@ -2099,35 +2345,20 @@ class XRDGuiApp(ttk.Frame):
             optional=True,
         )
 
-        fitting = self._section(parent, "One/Two-Peak Fit", 1)
+        fitting = self._named_section(parent, "peak.fit_options", "One/Two-Peak Fit", 3)
         self._entry(fitting, 0, "Peak center", "peak.center", "Approximate 2theta center of the peak or split-peak pair.")
         self._entry(fitting, 1, "Fit window", "peak.window", "Half-width in 2theta degrees around Peak center.", default="0.5")
-        self._radio_group(
-            fitting,
-            2,
-            "Fit mode",
-            "peak.fit_mode",
-            [
-                ("compare", "Compare 1 vs 2", "Fit both one-peak and two-peak models and report delta BIC."),
-                ("single", "Single peak", "Fit only one pseudo-Voigt peak."),
-                ("two", "Two peaks", "Fit only two pseudo-Voigt peaks."),
-            ],
-            default="compare",
-        )
         self._entry(
             fitting,
-            3,
+            2,
             "Initial split",
             "peak.split_guess",
             "Optional initial separation between the two peak centers in degrees.",
             optional=True,
         )
-        self.variables["peak.scan_type"].trace_add("write", lambda *_: self._update_peak_mode())
-        self._update_peak_mode()
-        self._checkbox(fitting, 4, "Show final plot", "peak.show_final", "Display the first scan fit and trend plot interactively.", optional=True)
         self._checkbox(
             fitting,
-            5,
+            3,
             "Save every diagnostic plot",
             "peak.diagnostic_all_fits",
             "Save one diagnostic image for every successful scan. Each image shows only the final one-peak and/or two-peak fits.",
@@ -2135,13 +2366,13 @@ class XRDGuiApp(ttk.Frame):
             default=True,
         )
         buttons = ttk.Frame(parent)
-        buttons.grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
-        run_button = ttk.Button(buttons, text="Run Peak Analysis", command=self.run_peak_analysis)
-        run_button.grid(row=0, column=0, padx=(0, 8))
-        ToolTip(run_button, "Fit the selected peak across scans using the current settings.")
-        replot_button = ttk.Button(buttons, text="Replot Existing Results", command=self.replot_peak_analysis)
-        replot_button.grid(row=0, column=1, padx=(0, 8))
-        ToolTip(replot_button, "Read the Existing results CSV and replot it using the current X/metadata field.")
+        buttons.grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.peak_action_button = ttk.Button(buttons, text="Run Peak Analysis", command=self.run_peak_action)
+        self.peak_action_button.grid(row=0, column=0, padx=(0, 8))
+        ToolTip(self.peak_action_button, "Run the selected Peak Analysis action.")
+        action.trace_add("write", lambda *_: self._update_peak_mode())
+        self.variables["peak.scan_type"].trace_add("write", lambda *_: self._update_peak_mode())
+        self._update_peak_mode()
 
     def _build_sin2psi_tab(self, parent):
         inputs = self._named_section(parent, "sin2psi.inputs", "Inputs", 0)
@@ -2199,10 +2430,32 @@ class XRDGuiApp(ttk.Frame):
         self._combo(correction, 2, "Method", "sin2psi.correction_method", ["polynomial", "gaussian_process"], "Correction fit method.", "polynomial")
         self._entry(correction, 3, "Polynomial degree", "sin2psi.correction_degree", "Degree used for polynomial correction fitting.", default="2")
         self._entry(correction, 4, "Reference 2theta", "sin2psi.reference_two_theta", "Optional reference angle; leave blank to fit true 2theta.", optional=True)
+
+        summary = self._named_section(parent, "sin2psi.summary", "Summary Plotting", 5)
+        self._combo(
+            summary,
+            0,
+            "X/metadata field",
+            "sin2psi.summary_x",
+            X_METADATA_OPTIONS,
+            "Trend x-axis for sin2psi summary plots.",
+            "scan_number",
+        )
+        self._combo(
+            summary,
+            1,
+            "Second y-axis",
+            "sin2psi.summary_secondary_y",
+            ["none", "slope", "stress", "temperature", "energy", "chi", "psi_deg", "sin2psi"],
+            "Optional right-hand y-axis for sin2psi summary plots. You can type any numeric column in the summary CSV.",
+            "none",
+            optional=True,
+            readonly=False,
+        )
         action.trace_add("write", lambda *_: self._update_sin2psi_mode())
         self.variables["sin2psi.correction_method"].trace_add("write", lambda *_: self._update_sin2psi_mode())
         self._update_sin2psi_mode()
-        self._sin2psi_buttons(parent, 5)
+        self._sin2psi_buttons(parent, 6)
 
     def show_help(self):
         if self.help_window is not None and self.help_window.winfo_exists():
@@ -2404,7 +2657,7 @@ class XRDGuiApp(ttk.Frame):
                 "Offset: Vertical spacing multiplier for spectra traces.\n"
                 "X/metadata field: Trend x-axis. Common values include scan_number, temperature, energy, start_time, and frame_time. "
                 "Other metadata columns can work if they were collected into the summary files.\n"
-                "Summary CSV: Optional exact summary file for Gradient or Stress plots. Leave blank to collect/reuse the current summary.\n"
+                "Summary CSV: Optional exact sin2psi scan summary file for Gradient or Stress plots. Leave blank to collect/reuse the current summary.\n"
                 "Show final plot displays the result interactively. Save final plot writes the result automatically when Run Selected Plot is used.\n"
                 "Save Current Plot: Saves the currently open Matplotlib figure into saved_plots under the data directory, or under the "
                 "selected Summary CSV folder if one is set.\n\n"
@@ -2456,11 +2709,14 @@ class XRDGuiApp(ttk.Frame):
                 "Frame index: The frame file to fit in each scan. This is disabled for delta scans because all delta frames are combined.\n"
                 "X/metadata field: The trend x-axis. scan_number always works; temperature, energy, chi, and time fields work "
                 "when they are present in the TXT metadata.\n"
-                "Existing results CSV: A saved peak_series CSV. Use Replot Existing Results to change the x-axis without refitting.\n\n"
+                "Second y-axis: Optional right-hand y-axis on the peak trend plot. Choose one of the common peak-analysis metrics, "
+                "or type any numeric column present in the peak_series CSV.\n"
+                "Existing results CSV: A saved peak_series CSV. Select Replot existing results to change the x-axis, second y-axis, "
+                "or displayed peak model without refitting.\n\n"
                 "One/two-peak fit:\n"
                 "- Peak center is the approximate 2theta location of the peak or split-peak pair.\n"
                 "- Fit window is the half-width around that center used for fitting.\n"
-                "- Compare 1 vs 2 fits both models. Single peak and Two peaks force only that model.\n"
+                "- 1 vs 2 fits or shows both models. 1 peak and 2 peaks force fitting or plotting of only that model.\n"
                 "- Initial split is an optional starting separation for the two-peak fit. If blank, quixrd estimates starting "
                 "positions from local maxima or a small symmetric split.\n\n"
                 "Validity of two peaks:\n"
@@ -2471,7 +2727,7 @@ class XRDGuiApp(ttk.Frame):
                 "The CSV stores selected_model as quixrd's assessment of which model is preferred. The trend plot shows the "
                 "one-peak fit in orange and the two-peak fit in green where available; non-selected model points are faded. "
                 "The delta BIC comparison panel also shows the minor/major peak-height ratio on a right-hand axis when two-peak results exist. The comparison panel "
-                "appears when Fit mode is Compare 1 vs 2, or when an existing CSV contains two-peak intensity ratios.\n\n"
+                "appears when Peak plot model is 1 vs 2.\n\n"
                 "Diagnostics:\n"
                 "Each run saves one compact diagnostic plot with representative fits by default. It includes the first successful "
                 "scan, a median-comparison scan when delta BIC is available, and the worst-RMSE scan. Enable Save every diagnostic plot "
@@ -2500,7 +2756,8 @@ class XRDGuiApp(ttk.Frame):
                 "refitting peak shapes.\n"
                 "- Generate correction creates a correction curve from a stress-free reference scan. Polynomial and Gaussian-process "
                 "methods are available.\n"
-                "- Plot summaries creates gradient summary plots from existing output files.\n\n"
+                "- Plot summaries creates gradient summary plots from existing output files. Use the Summary Plotting section to choose "
+                "the x-axis and an optional second y-axis.\n\n"
                 "Exclusions and correction:\n"
                 "- Exclude frames removes specific frame indices from the trend fit.\n"
                 "- Exclude chi ranges removes chi intervals such as 0-5 or 85-90 degrees.\n"
@@ -2529,11 +2786,15 @@ class XRDGuiApp(ttk.Frame):
         frame = ttk.LabelFrame(self, text="Command Log", padding=6)
         frame.grid(row=1, column=0, sticky="ew", pady=(10, 4))
         frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(2, weight=0)
         self.log_text = tk.Text(frame, height=6, wrap="word")
         self.log_text.grid(row=0, column=0, sticky="ew")
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.log_text.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scrollbar.set)
+        self.cancel_button = ttk.Button(frame, text="Cancel Task", command=self.cancel_current_task, state="disabled")
+        self.cancel_button.grid(row=0, column=2, sticky="ne", padx=(8, 0))
+        ToolTip(self.cancel_button, "Request cancellation of the current long-running task. Some operations stop between scans or files.")
 
     def _build_status_bar(self):
         self.status_bar = ttk.Label(self, textvariable=self.status_var, anchor="w", relief="sunken", padding=(6, 3))
@@ -2541,6 +2802,18 @@ class XRDGuiApp(ttk.Frame):
 
     def set_status(self, message):
         self.status_var.set(message)
+
+    def cancel_current_task(self):
+        if not self.task_running:
+            self.log("No running task to cancel.")
+            return
+        self.cancel_event.set()
+        self.log("Cancellation requested. Waiting for the current file/scan operation to finish...")
+
+    def _set_task_running(self, running):
+        self.task_running = bool(running)
+        if hasattr(self, "cancel_button"):
+            self.cancel_button.configure(state="normal" if running else "disabled")
 
     def log(self, message):
         self.log_text.insert("end", f"{message}\n")

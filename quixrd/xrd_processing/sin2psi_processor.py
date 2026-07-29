@@ -1768,7 +1768,113 @@ def _set_ylim_from_points(ax, values, pad_fraction=0.08):
     ax.set_ylim(ymin - pad, ymax + pad)
 
 
-def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, show=False, summary_csv=None):
+def _normalise_secondary_y(secondary_y):
+    if secondary_y is None:
+        return None
+    text = str(secondary_y).strip()
+    if not text or text.lower() in {"none", "off", "false"}:
+        return None
+    return text
+
+
+def _error_column_for_y(column):
+    return {
+        "slope": "slope_err",
+        "stress": "stress_err",
+        "fwhm": "fwhm_err",
+        "peak_center": "peak_center_err",
+        "trend_value": "trend_err",
+    }.get(column)
+
+
+def _pretty_axis_label(column):
+    return {
+        "slope": "sin2psi gradient (slope)",
+        "stress": "stress",
+        "fwhm": "FWHM",
+        "peak_center": "Peak position (2theta)",
+        "temperature": "temperature",
+        "energy": "energy",
+        "chi": "chi",
+        "psi_deg": "psi",
+        "sin2psi": "sin2psi",
+    }.get(str(column), str(column).replace("_", " "))
+
+
+def _x_values_for_index(x_values, index):
+    if isinstance(x_values, pd.Series):
+        return x_values.reindex(index)
+    return np.asarray(x_values)[np.asarray(index)]
+
+
+def _add_secondary_y_axis(ax, plot_df, x_values, secondary_y, selectors=None):
+    secondary_y = _normalise_secondary_y(secondary_y)
+    if secondary_y is None:
+        return None
+    if secondary_y not in plot_df.columns:
+        raise ValueError(f"Column '{secondary_y}' not found for secondary y-axis")
+
+    secondary_df = plot_df.dropna(subset=[secondary_y]).copy()
+    secondary_df[secondary_y] = pd.to_numeric(secondary_df[secondary_y], errors="coerce")
+    secondary_df = secondary_df.loc[secondary_df[secondary_y].notna()]
+    if secondary_df.empty:
+        raise RuntimeError(f"No usable points for secondary y-axis column '{secondary_y}'")
+
+    sec_ax = ax.twinx()
+    err_column = _error_column_for_y(secondary_y)
+    plotted_values = []
+    selectors = list(selectors or [])
+
+    if selectors and "selector" in secondary_df.columns and len(selectors) > 1:
+        for selector in selectors:
+            series = secondary_df.loc[secondary_df["selector"] == selector].copy()
+            if series.empty:
+                continue
+            yerr = None
+            if err_column and err_column in series.columns:
+                err_values = pd.to_numeric(series[err_column], errors="coerce")
+                if err_values.notna().any():
+                    yerr = err_values.to_numpy(dtype=float)
+            sec_ax.errorbar(
+                _x_values_for_index(x_values, series.index),
+                series[secondary_y],
+                yerr=yerr,
+                fmt=".--",
+                capsize=2,
+                linewidth=0.8,
+                markersize=4,
+                alpha=0.75,
+                color="tab:red",
+                label=f"{_pretty_axis_label(secondary_y)} ({_selector_title(selector)})",
+            )
+            plotted_values.extend(series[secondary_y].tolist())
+        sec_ax.legend(fontsize=8, loc="upper right")
+    else:
+        yerr = None
+        if err_column and err_column in secondary_df.columns:
+            err_values = pd.to_numeric(secondary_df[err_column], errors="coerce")
+            if err_values.notna().any():
+                yerr = err_values.to_numpy(dtype=float)
+        sec_ax.errorbar(
+            _x_values_for_index(x_values, secondary_df.index),
+            secondary_df[secondary_y],
+            yerr=yerr,
+            fmt=".--",
+            capsize=2,
+            linewidth=0.8,
+            markersize=4,
+            alpha=0.75,
+            color="tab:red",
+            label=_pretty_axis_label(secondary_y),
+        )
+
+    sec_ax.set_ylabel(_pretty_axis_label(secondary_y), color="tab:red")
+    sec_ax.tick_params(axis="y", labelcolor="tab:red")
+    _set_ylim_from_points(sec_ax, plotted_values or secondary_df[secondary_y])
+    return sec_ax
+
+
+def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, show=False, summary_csv=None, secondary_y=None):
     """
     Plot sin2psi gradient (slope) vs a specified x-axis variable (default: scan_number).
     args:
@@ -1784,6 +1890,7 @@ def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, sho
     else:
         df = collect_sin2psi_summaries(data_dir, scans=scans, save_csv=False)
         selected_summary_path = None
+    secondary_y = _normalise_secondary_y(secondary_y)
     plot_df, x_values, x_label = _prepare_plot_frame(df, x, "slope")
 
     yerr = None
@@ -1802,6 +1909,7 @@ def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, sho
         linewidth=0.8,
         markersize=4,
     )
+    _add_secondary_y_axis(ax, plot_df, x_values, secondary_y)
     _set_ylim_from_points(ax, plot_df["slope"])
     ax.set_xlabel(str(x_label).replace("_", " "))
     ax.set_ylabel("sin2psi gradient (slope)")
@@ -1829,7 +1937,10 @@ def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, sho
                 "sin2psi_scan_summary_{timestamp}.csv",
                 legacy_dirs=[export_root],
             )
-        output_path = _unique_path(plot_dir / f"sin2psi_gradient_vs_{x_suffix}_{stamp}.png")
+        if secondary_y:
+            output_path = _unique_path(plot_dir / f"sin2psi_gradient_vs_{x_suffix}_with_{_safe_plot_suffix(secondary_y)}_{stamp}.png")
+        else:
+            output_path = _unique_path(plot_dir / f"sin2psi_gradient_vs_{x_suffix}_{stamp}.png")
         fig.savefig(output_path, dpi=150)
     if show:
         plt.show()
@@ -1842,12 +1953,13 @@ def plot_sin2psi_gradients(data_dir, x="scan_number", scans=None, save=True, sho
     }
 
 
-def plot_sin2psi_stress(data_dir, x="scan_number", scans=None, save=True, show=False, summary_csv=None):
+def plot_sin2psi_stress(data_dir, x="scan_number", scans=None, save=True, show=False, summary_csv=None, secondary_y=None):
     if summary_csv:
         df, selected_summary_path = _load_sin2psi_summary_csv(summary_csv, scans=scans)
     else:
         df = collect_sin2psi_summaries(data_dir, scans=scans, save_csv=False)
         selected_summary_path = None
+    secondary_y = _normalise_secondary_y(secondary_y)
     plot_df, x_values, x_label = _prepare_plot_frame(df, x, "stress")
     yerr = None
     if "stress_err" in plot_df.columns:
@@ -1865,6 +1977,7 @@ def plot_sin2psi_stress(data_dir, x="scan_number", scans=None, save=True, show=F
         linewidth=0.8,
         markersize=4,
     )
+    _add_secondary_y_axis(ax, plot_df, x_values, secondary_y)
     _set_ylim_from_points(ax, plot_df["stress"])
     ax.set_xlabel(str(x_label).replace("_", " "))
     units = ""
@@ -1895,7 +2008,10 @@ def plot_sin2psi_stress(data_dir, x="scan_number", scans=None, save=True, show=F
                 "sin2psi_scan_summary_{timestamp}.csv",
                 legacy_dirs=[export_root],
             )
-        output_path = _unique_path(plot_dir / f"sin2psi_stress_vs_{x_suffix}_{stamp}.png")
+        if secondary_y:
+            output_path = _unique_path(plot_dir / f"sin2psi_stress_vs_{x_suffix}_with_{_safe_plot_suffix(secondary_y)}_{stamp}.png")
+        else:
+            output_path = _unique_path(plot_dir / f"sin2psi_stress_vs_{x_suffix}_{stamp}.png")
         fig.savefig(output_path, dpi=150)
     if show:
         plt.show()
@@ -2057,8 +2173,10 @@ def _plot_fit_value_trends(
     scans=None,
     save=True,
     show=False,
+    secondary_y=None,
 ):
     plot_df, _x_values, x_label = _prepare_plot_frame(df, x, y_column)
+    secondary_y = _normalise_secondary_y(secondary_y)
     fig, ax = plt.subplots(figsize=(7, 4.5))
     selectors = list(plot_df["selector"].dropna().unique()) if "selector" in plot_df.columns else ["selected"]
     for selector in selectors:
@@ -2079,6 +2197,7 @@ def _plot_fit_value_trends(
             markersize=4,
             label=_selector_title(selector),
         )
+    _add_secondary_y_axis(ax, plot_df, _x_values, secondary_y, selectors=selectors)
     _set_ylim_from_points(ax, plot_df[y_column])
     ax.set_xlabel(str(x_label).replace("_", " "))
     ax.set_ylabel(ylabel)
@@ -2105,7 +2224,10 @@ def _plot_fit_value_trends(
         selector_suffix = _safe_plot_suffix(selector)
         x_suffix = _safe_plot_suffix(x)
         summary_path = _unique_path(summary_dir / f"sin2psi_{file_prefix}_summary_{stamp}.csv")
-        output_path = _unique_path(plot_dir / f"sin2psi_{file_prefix}_vs_{x_suffix}_{selector_suffix}_{stamp}.png")
+        if secondary_y:
+            output_path = _unique_path(plot_dir / f"sin2psi_{file_prefix}_vs_{x_suffix}_{selector_suffix}_with_{_safe_plot_suffix(secondary_y)}_{stamp}.png")
+        else:
+            output_path = _unique_path(plot_dir / f"sin2psi_{file_prefix}_vs_{x_suffix}_{selector_suffix}_{stamp}.png")
         df.to_csv(summary_path, index=False)
         fig.savefig(output_path, dpi=150)
     if show:
@@ -2119,7 +2241,7 @@ def _plot_fit_value_trends(
     }
 
 
-def plot_fwhm_trends(data_dir, x="scan_number", scans=None, frame_index=None, chi=None, save=True, show=False):
+def plot_fwhm_trends(data_dir, x="scan_number", scans=None, frame_index=None, chi=None, save=True, show=False, secondary_y=None):
     df = collect_fwhm_summaries(data_dir, scans=scans, frame_index=frame_index, chi=chi)
     return _plot_fit_value_trends(
         df,
@@ -2133,10 +2255,11 @@ def plot_fwhm_trends(data_dir, x="scan_number", scans=None, frame_index=None, ch
         scans=scans,
         save=save,
         show=show,
+        secondary_y=secondary_y,
     )
 
 
-def plot_peak_position_trends(data_dir, x="scan_number", scans=None, frame_index=None, chi=None, save=True, show=False):
+def plot_peak_position_trends(data_dir, x="scan_number", scans=None, frame_index=None, chi=None, save=True, show=False, secondary_y=None):
     df = collect_peak_position_summaries(data_dir, scans=scans, frame_index=frame_index, chi=chi)
     return _plot_fit_value_trends(
         df,
@@ -2150,6 +2273,7 @@ def plot_peak_position_trends(data_dir, x="scan_number", scans=None, frame_index
         scans=scans,
         save=save,
         show=show,
+        secondary_y=secondary_y,
     )
 
 

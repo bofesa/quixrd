@@ -31,6 +31,10 @@ def _timestamp():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
+def _safe_suffix(value):
+    return re.sub(r"[^0-9A-Za-z]+", "_", str(value)).strip("_") or "value"
+
+
 def _coerce(value):
     text = str(value).strip()
     try:
@@ -625,34 +629,98 @@ def _plot_selected_series(ax, x_values, df, y_col, err_col, label, color, select
         _apply_errorbar_alpha(container, TREND_ERROR_ALPHA * alpha)
 
 
-def _plot_trends(path, df, x="scan_number", show=False):
+def _error_column_for_y(column):
+    return {
+        "delta_bic": None,
+        "minor_major_height_ratio": None,
+        "two_minor_major_height_ratio": None,
+        "height_ratio_2_over_1": None,
+    }.get(column, f"{column}_err")
+
+
+def _add_secondary_y_axis(ax, x_values, df, secondary_y):
+    if secondary_y is None:
+        return None
+    secondary_y = str(secondary_y).strip()
+    if not secondary_y or secondary_y.lower() in {"none", "off", "false"}:
+        return None
+    if secondary_y not in df.columns:
+        raise ValueError(f"Column '{secondary_y}' not found in Peak Analysis results")
+    values = pd.to_numeric(df[secondary_y], errors="coerce")
+    mask = values.notna()
+    if not mask.any():
+        raise ValueError(f"No numeric values found for secondary y-axis column '{secondary_y}'")
+    sec_ax = ax.twinx()
+    err_col = _error_column_for_y(secondary_y)
+    yerr = None
+    if err_col and err_col in df.columns:
+        err_values = pd.to_numeric(df.loc[mask, err_col], errors="coerce")
+        if err_values.notna().any():
+            yerr = err_values.to_numpy(dtype=float)
+    container = sec_ax.errorbar(
+        _subset_values(x_values, mask),
+        values.loc[mask],
+        yerr=yerr,
+        fmt=".--",
+        markersize=TREND_MARKER_SIZE,
+        elinewidth=0.8,
+        capsize=1.5,
+        linewidth=0.8,
+        color="tab:red",
+        ecolor="tab:red",
+        alpha=0.75,
+        label=str(secondary_y).replace("_", " "),
+    )
+    _apply_errorbar_alpha(container, TREND_ERROR_ALPHA)
+    sec_ax.set_ylabel(str(secondary_y).replace("_", " "), color="tab:red")
+    sec_ax.tick_params(axis="y", labelcolor="tab:red")
+    finite = values.loc[mask].to_numpy(dtype=float)
+    ymin = float(np.nanmin(finite))
+    ymax = float(np.nanmax(finite))
+    pad = max((ymax - ymin) * 0.08, 1.0 if ymin == ymax else 0.0)
+    sec_ax.set_ylim(ymin - pad, ymax + pad)
+    sec_ax.legend(fontsize=8, loc="upper right")
+    return sec_ax
+
+
+def _normalise_plot_mode(plot_mode):
+    text = str(plot_mode or "compare").strip().lower()
+    if text in {"single", "one", "1", "1-peak", "one_peak"}:
+        return "single"
+    if text in {"two", "2", "2-peak", "two_peak"}:
+        return "two"
+    return "compare"
+
+
+def _plot_trends(path, df, x="scan_number", show=False, secondary_y=None, plot_mode="compare", save=True):
+    plot_mode = _normalise_plot_mode(plot_mode)
     has_comparison = "delta_bic" in df.columns and df["delta_bic"].notna().any()
     ratio_column = None
     for candidate in ("minor_major_height_ratio", "height_ratio_2_over_1", "two_minor_major_height_ratio"):
         if candidate in df.columns and df[candidate].notna().any():
             ratio_column = candidate
             break
-    has_comparison_panel = has_comparison or ratio_column is not None
+    has_comparison_panel = plot_mode == "compare" and (has_comparison or ratio_column is not None)
     panel_count = 2 + int(has_comparison_panel)
     fig, axes = plt.subplots(panel_count, 1, figsize=(8.5, 3.2 * panel_count + 0.6), sharex=True)
     axes = np.atleast_1d(axes)
     x_values, is_datetime = _trend_x_values(df, x)
 
-    if "single_center_1" in df.columns and df["single_center_1"].notna().any():
+    if plot_mode in {"compare", "single"} and "single_center_1" in df.columns and df["single_center_1"].notna().any():
         _plot_selected_series(axes[0], x_values, df, "single_center_1", "single_center_1_err", "1-peak center", "tab:orange", "single")
         _plot_selected_series(axes[1], x_values, df, "single_fwhm_1", "single_fwhm_1_err", "1-peak FWHM", "tab:orange", "single")
-    else:
+    elif plot_mode in {"compare", "single"} and "center_1" in df.columns:
         container = _errorbar(axes[0], x_values, df["center_1"], yerr=df.get("center_1_err"), label="peak 1", color="tab:orange")
         _apply_errorbar_alpha(container)
         container = _errorbar(axes[1], x_values, df["fwhm_1"], yerr=df.get("fwhm_1_err"), label="peak 1", color="tab:orange")
         _apply_errorbar_alpha(container)
 
-    if "two_center_1" in df.columns and df["two_center_1"].notna().any():
+    if plot_mode in {"compare", "two"} and "two_center_1" in df.columns and df["two_center_1"].notna().any():
         _plot_selected_series(axes[0], x_values, df, "two_center_1", "two_center_1_err", "2-peak center 1", "tab:green", "two")
         _plot_selected_series(axes[0], x_values, df, "two_center_2", "two_center_2_err", "2-peak center 2", "tab:green", "two")
         _plot_selected_series(axes[1], x_values, df, "two_fwhm_1", "two_fwhm_1_err", "2-peak FWHM 1", "tab:green", "two")
         _plot_selected_series(axes[1], x_values, df, "two_fwhm_2", "two_fwhm_2_err", "2-peak FWHM 2", "tab:green", "two")
-    elif "center_2" in df.columns and df["center_2"].notna().any():
+    elif plot_mode in {"compare", "two"} and "center_2" in df.columns and df["center_2"].notna().any():
         container = _errorbar(axes[0], x_values, df["center_1"], yerr=df.get("center_1_err"), label="2-peak center 1", color="tab:green")
         _apply_errorbar_alpha(container)
         container = _errorbar(axes[0], x_values, df["center_2"], yerr=df.get("center_2_err"), label="2-peak center 2", color="tab:green")
@@ -661,6 +729,7 @@ def _plot_trends(path, df, x="scan_number", show=False):
         _apply_errorbar_alpha(container)
         container = _errorbar(axes[1], x_values, df["fwhm_2"], yerr=df.get("fwhm_2_err"), label="2-peak FWHM 2", color="tab:green")
         _apply_errorbar_alpha(container)
+    _add_secondary_y_axis(axes[0], x_values, df, secondary_y)
     if has_comparison_panel:
         comparison_ax = axes[2]
         handles = []
@@ -692,7 +761,8 @@ def _plot_trends(path, df, x="scan_number", show=False):
         if ax is not axes[-1] or not has_comparison_panel:
             ax.legend(fontsize=8)
     fig.tight_layout()
-    fig.savefig(path, dpi=150)
+    if save:
+        fig.savefig(path, dpi=150)
     if not show:
         plt.close(fig)
     return fig
@@ -798,7 +868,7 @@ def _plot_diagnostics(path, fit_results, show=False, all_fits=False):
     return written
 
 
-def plot_peak_series_from_csv(csv_path, x="scan_number", save=True, show=False):
+def plot_peak_series_from_csv(csv_path, x="scan_number", save=True, show=False, secondary_y=None, plot_mode="compare"):
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"Peak Analysis CSV not found: {csv_path}")
@@ -809,12 +879,17 @@ def plot_peak_series_from_csv(csv_path, x="scan_number", save=True, show=False):
     if usable.empty:
         raise ValueError(f"Peak Analysis CSV has no successful fits: {csv_path}")
     stamp = _timestamp()
-    plot_path = csv_path.parent / f"{csv_path.stem}_replot_vs_{x}_{stamp}.png"
+    plot_mode = _normalise_plot_mode(plot_mode)
+    suffix = f"_{plot_mode}"
+    if secondary_y and str(secondary_y).strip().lower() not in {"none", "off", "false"}:
+        suffix += f"_with_{_safe_suffix(secondary_y)}"
+    plot_path = csv_path.parent / f"{csv_path.stem}_replot_vs_{_safe_suffix(x)}{suffix}_{stamp}.png"
     if save:
-        _plot_trends(plot_path, usable, x=x, show=show)
+        _plot_trends(plot_path, usable, x=x, show=show, secondary_y=secondary_y, plot_mode=plot_mode, save=True)
     elif show:
-        _plot_trends(plot_path, usable, x=x, show=True)
-    return {"data": usable, "plot_path": str(plot_path), "csv_path": str(csv_path), "x": x}
+        _plot_trends(plot_path, usable, x=x, show=True, secondary_y=secondary_y, plot_mode=plot_mode, save=False)
+        plot_path = None
+    return {"data": usable, "plot_path": str(plot_path) if plot_path else None, "csv_path": str(csv_path), "x": x, "secondary_y": secondary_y, "plot_mode": plot_mode}
 
 
 def _plot_scan_diagnostic(path, fit_item, index, total, show=False):
@@ -839,6 +914,9 @@ def run_peak_series(
     show=False,
     diagnostic_all_fits=False,
     progress_callback=None,
+    cancel_check=None,
+    secondary_y=None,
+    plot_mode=None,
 ):
     if peak_center in (None, ""):
         raise ValueError("peak_center is required for peak analysis")
@@ -864,6 +942,8 @@ def run_peak_series(
         progress_callback(f"Peak Analysis: fitting {total} scan(s)")
     diagnostic_plot_paths = []
     for scan_idx, scan in enumerate(scans, start=1):
+        if cancel_check and cancel_check():
+            raise RuntimeError("Peak Analysis cancelled by user")
         if progress_callback:
             progress_callback(f"Peak Analysis: scan {scan} ({scan_idx}/{total})")
         try:
@@ -911,12 +991,12 @@ def run_peak_series(
         df.to_csv(csv_path, index=False)
         usable = df[df.get("fit_success", False) == True] if "fit_success" in df.columns else df
         if not usable.empty and "center_1" in usable.columns:
-            _plot_trends(plot_path, usable, x=x, show=show)
+            _plot_trends(plot_path, usable, x=x, show=show, secondary_y=secondary_y, plot_mode=plot_mode or fit_mode)
             if not diagnostic_all_fits:
                 diagnostic_plot_paths = _plot_diagnostics(
                     diagnostic_plot_path,
                     fit_results,
-                    show=show,
+                    show=False,
                     all_fits=False,
                 )
             if show:
@@ -935,6 +1015,8 @@ def run_peak_series(
             "fit_mode": fit_mode,
             "split_guess": split_guess,
             "x": x,
+            "secondary_y": secondary_y,
+            "plot_mode": plot_mode or fit_mode,
             "diagnostic_all_fits": diagnostic_all_fits,
             "csv_path": str(csv_path),
             "plot_path": str(plot_path),

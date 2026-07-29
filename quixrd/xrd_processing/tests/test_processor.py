@@ -451,9 +451,32 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertIn("center_2", df.columns)
             self.assertIn("minor_major_height_ratio", df.columns)
 
-            replot = spinodal.plot_peak_series_from_csv(result["csv_path"], x="temperature", save=True, show=False)
+            replot = spinodal.plot_peak_series_from_csv(
+                result["csv_path"],
+                x="temperature",
+                save=True,
+                show=False,
+                plot_mode="two",
+                secondary_y="minor_major_height_ratio",
+            )
             self.assertTrue(Path(replot["plot_path"]).exists())
             self.assertEqual(replot["x"], "temperature")
+            self.assertEqual(replot["plot_mode"], "two")
+            self.assertEqual(replot["secondary_y"], "minor_major_height_ratio")
+            self.assertIn("_two_with_minor_major_height_ratio_", Path(replot["plot_path"]).name)
+            before_display = set(Path(result["csv_path"]).parent.glob("*_replot_vs_*.png"))
+            display_only = spinodal.plot_peak_series_from_csv(
+                result["csv_path"],
+                x="temperature",
+                save=False,
+                show=True,
+                plot_mode="two",
+                secondary_y="minor_major_height_ratio",
+            )
+            after_display = set(Path(result["csv_path"]).parent.glob("*_replot_vs_*.png"))
+            self.assertEqual(before_display, after_display)
+            self.assertIsNone(display_only["plot_path"])
+            spinodal.plt.close("all")
 
     def test_spinodal_two_peak_fit_finds_clear_shoulder(self):
         x = np.linspace(28.5, 30.1, 450)
@@ -479,6 +502,29 @@ class ProcessorSmokeTest(unittest.TestCase):
         self.assertLessEqual(fit["two"]["minor_major_height_ratio"], 1.0)
         self.assertAlmostEqual(fit["two"]["center_1"], 29.06, delta=0.04)
         self.assertAlmostEqual(fit["two"]["center_2"], 29.27, delta=0.04)
+
+    def test_spinodal_peak_series_cancel_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            x = np.linspace(39.5, 40.5, 101)
+            y = 10.0 + 100.0 * np.exp(-np.log(2.0) * ((x - 40.0) / 0.08) ** 2)
+            path = root / "I_vs_2th_10_chi_0.txt"
+            path.write_text(
+                "\n".join(["# Scan Type: ascan_chi", "# 2theta intensity"] + [f"{xx:.5f} {yy:.8f}" for xx, yy in zip(x, y)]),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                spinodal.run_peak_series(
+                    root,
+                    scans=[10],
+                    scan_type="chi",
+                    frame_index=0,
+                    peak_center=40.0,
+                    fit_mode="single",
+                    save=False,
+                    cancel_check=lambda: True,
+                )
 
     def test_spinodal_delta_scans_are_homogenised_and_show_once(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -515,6 +561,8 @@ class ProcessorSmokeTest(unittest.TestCase):
                 )
 
             shown.assert_called_once()
+            self.assertEqual(len(spinodal.plt.get_fignums()), 1)
+            spinodal.plt.close("all")
             self.assertIn("Peak Analysis: fitting 1 scan(s)", messages)
             self.assertTrue(any("scan 20 fitted" in message for message in messages))
             self.assertTrue(any("finished (1 succeeded, 0 failed)" in message for message in messages))
@@ -560,15 +608,18 @@ class ProcessorSmokeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             compare_fig = spinodal._plot_trends(Path(tmp) / "compare.png", compare_df, show=True)
             time_fig = spinodal._plot_trends(Path(tmp) / "time.png", compare_df, x="start_time", show=True)
+            two_fig = spinodal._plot_trends(Path(tmp) / "two.png", compare_df, plot_mode="two", show=True)
             single_fig = spinodal._plot_trends(Path(tmp) / "single.png", single_df, show=True)
             try:
                 self.assertEqual(len(compare_fig.axes), 4)
                 self.assertEqual(len(time_fig.axes), 4)
                 self.assertNotEqual(type(time_fig.axes[2].xaxis.get_major_locator()).__name__, "StrCategoryLocator")
+                self.assertEqual(len(two_fig.axes), 2)
                 self.assertEqual(len(single_fig.axes), 2)
             finally:
                 spinodal.plt.close(compare_fig)
                 spinodal.plt.close(time_fig)
+                spinodal.plt.close(two_fig)
                 spinodal.plt.close(single_fig)
 
     def test_spinodal_fit_downsamples_dense_windows_and_caps_optimizer(self):
@@ -850,16 +901,24 @@ class ProcessorSmokeTest(unittest.TestCase):
             selected = Path(tmp) / "chosen_summary.csv"
             pd.DataFrame(
                 [
-                    {"scan_number": 101, "slope": 1.0, "slope_err": 0.1, "temperature": 300.0},
-                    {"scan_number": 102, "slope": 1.5, "slope_err": 0.2, "temperature": 350.0},
+                    {"scan_number": 101, "slope": 1.0, "slope_err": 0.1, "temperature": 300.0, "custom_metric": 8.0},
+                    {"scan_number": 102, "slope": 1.5, "slope_err": 0.2, "temperature": 350.0, "custom_metric": 9.0},
                 ]
             ).to_csv(selected, index=False)
 
-            result = proc.plot_sin2psi_gradients(tmp, x="temperature", scans=[102], show=False, summary_csv=selected)
+            result = proc.plot_sin2psi_gradients(
+                tmp,
+                x="temperature",
+                scans=[102],
+                show=False,
+                summary_csv=selected,
+                secondary_y="custom_metric",
+            )
 
             self.assertEqual(Path(result["summary_path"]), selected)
             self.assertEqual(result["summary"].loc[0, "scan_number"], 102)
             self.assertTrue(Path(result["plot_path"]).exists())
+            self.assertIn("custom_metric", Path(result["plot_path"]).name)
 
     def test_scan_title_uses_plotted_scans_when_selection_is_empty(self):
         self.assertEqual(proc._scan_title(None, [101, 102, 103]), "scans 101-103")
@@ -1269,11 +1328,15 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertIn("Select 2theta Calibration File...", calibration_labels)
             self.assertIn("Apply 2theta Calibration by Default", calibration_labels)
             for section_name in [
+                "peak.inputs",
+                "peak.replot",
+                "peak.fit_options",
                 "sin2psi.inputs",
                 "sin2psi.peak_options",
                 "sin2psi.exclusions",
                 "sin2psi.stress",
                 "sin2psi.calibration",
+                "sin2psi.summary",
             ]:
                 self.assertIn(section_name, app.sections)
             help_titles = [title for title, _text in app._help_sections()]
@@ -1367,6 +1430,7 @@ class ProcessorSmokeTest(unittest.TestCase):
                 captured = {}
 
                 def immediate_run(title, func, on_success=None, run_on_main=False):
+                    captured["run_on_main"] = run_on_main
                     captured["result"] = func()
                     if on_success:
                         on_success(captured["result"])
@@ -1384,7 +1448,17 @@ class ProcessorSmokeTest(unittest.TestCase):
                 self.assertEqual(app.twotheta_calibration_file.get(), "calibration.json")
                 self.assertTrue(app.apply_twotheta_calibration_var.get())
 
-            with mock.patch.object(gui_app.peak_analysis, "run_peak_series", return_value={"csv_path": "peaks.csv", "plot_path": "peaks.png"}) as peak_run:
+            with mock.patch.object(gui_app.peak_analysis, "run_peak_series", return_value={"csv_path": "peaks.csv", "plot_path": "peaks.png"}) as peak_run, \
+                    mock.patch.object(app, "_show_peak_trend_from_csv") as show_peak_trend:
+                captured = {}
+
+                def immediate_run(title, func, on_success=None, run_on_main=False):
+                    captured["run_on_main"] = run_on_main
+                    captured["result"] = func()
+                    if on_success:
+                        on_success(captured["result"])
+
+                app._run_task = immediate_run
                 app.variables["peak.data_dir"].set(str(Path(tmp)))
                 app.variables["peak.scans"].set("10-11")
                 app.variables["peak.scan_type"].set("delta")
@@ -1392,24 +1466,33 @@ class ProcessorSmokeTest(unittest.TestCase):
                 app.variables["peak.center"].set("40.0")
                 app.variables["peak.window"].set("0.7")
                 app.variables["peak.fit_mode"].set("compare")
+                app.variables["peak.secondary_y"].set("minor_major_height_ratio")
                 app.variables["peak.show_final"].set(True)
                 app.variables["peak.diagnostic_all_fits"].set(True)
                 app._update_peak_mode()
+                self.assertTrue(app.sections["peak.inputs"].grid_info())
+                self.assertFalse(app.sections["peak.replot"].grid_info())
+                self.assertTrue(app.sections["peak.fit_options"].grid_info())
                 self.assertFalse(app.widgets["peak.frame_index"][1].grid_info())
-                app.run_peak_analysis()
+                app.run_peak_action()
                 self.assertEqual(peak_run.call_args.kwargs["scans"], [10, 11])
                 self.assertIsNone(peak_run.call_args.kwargs["frame_index"])
                 self.assertEqual(peak_run.call_args.kwargs["peak_center"], 40.0)
                 self.assertEqual(peak_run.call_args.kwargs["fit_mode"], "compare")
-                self.assertTrue(peak_run.call_args.kwargs["show"])
+                self.assertEqual(peak_run.call_args.kwargs["plot_mode"], "compare")
+                self.assertEqual(peak_run.call_args.kwargs["secondary_y"], "minor_major_height_ratio")
+                self.assertFalse(peak_run.call_args.kwargs["show"])
                 self.assertTrue(peak_run.call_args.kwargs["diagnostic_all_fits"])
                 self.assertTrue(callable(peak_run.call_args.kwargs["progress_callback"]))
+                self.assertFalse(captured["run_on_main"])
+                show_peak_trend.assert_called_once_with("peaks.csv")
 
                 app.variables["peak.scan_type"].set("chi")
+                app.variables["peak.show_final"].set(False)
                 app._update_peak_mode()
                 self.assertTrue(app.widgets["peak.frame_index"][1].grid_info())
                 self.assertNotEqual(app.widgets["peak.frame_index"][1].cget("state"), "disabled")
-                app.run_peak_analysis()
+                app.run_peak_action()
                 self.assertEqual(peak_run.call_args.kwargs["frame_index"], 0)
 
                 app.variables["peak.scan_type"].set("omega")
@@ -1417,17 +1500,27 @@ class ProcessorSmokeTest(unittest.TestCase):
                 app._update_peak_mode()
                 self.assertFalse(app.widgets["peak.frame_index"][1].grid_info())
                 with mock.patch.object(gui_app.peak_analysis, "discover_scan_numbers", return_value=[20, 21, 22, 23, 24]):
-                    app.run_peak_analysis()
+                    app.run_peak_action()
                 self.assertIsNone(peak_run.call_args.kwargs["frame_index"])
                 self.assertEqual(peak_run.call_args.kwargs["scans"], [20, 22, 24])
 
             with mock.patch.object(gui_app.peak_analysis, "plot_peak_series_from_csv", return_value={"csv_path": "peaks.csv", "plot_path": "replot.png"}) as peak_replot:
+                app.variables["peak.action"].set("replot")
                 app.variables["peak.results_csv"].set(str(Path(tmp) / "peak_series.csv"))
                 app.variables["peak.x"].set("temperature")
+                app.variables["peak.fit_mode"].set("two")
+                app.variables["peak.secondary_y"].set("minor_major_height_ratio")
                 app.variables["peak.show_final"].set(False)
-                app.replot_peak_analysis()
+                app._update_peak_mode()
+                self.assertFalse(app.sections["peak.inputs"].grid_info())
+                self.assertTrue(app.sections["peak.replot"].grid_info())
+                self.assertFalse(app.sections["peak.fit_options"].grid_info())
+                self.assertEqual(app.peak_action_button.cget("text"), "Replot Existing Results")
+                app.run_peak_action()
                 self.assertEqual(peak_replot.call_args.args[0], str(Path(tmp) / "peak_series.csv"))
                 self.assertEqual(peak_replot.call_args.kwargs["x"], "temperature")
+                self.assertEqual(peak_replot.call_args.kwargs["plot_mode"], "two")
+                self.assertEqual(peak_replot.call_args.kwargs["secondary_y"], "minor_major_height_ratio")
 
             help_text = app._help_text()
             self.assertIn("Delta scans are homogenised automatically", help_text)
@@ -1439,6 +1532,7 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertTrue(app.sections["sin2psi.exclusions"].grid_info())
             self.assertTrue(app.sections["sin2psi.stress"].grid_info())
             self.assertFalse(app.sections["sin2psi.calibration"].grid_info())
+            self.assertFalse(app.sections["sin2psi.summary"].grid_info())
 
             app.variables["sin2psi.action"].set("refit")
             app._update_sin2psi_mode()
@@ -1446,6 +1540,7 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertTrue(app.sections["sin2psi.exclusions"].grid_info())
             self.assertTrue(app.sections["sin2psi.stress"].grid_info())
             self.assertFalse(app.sections["sin2psi.calibration"].grid_info())
+            self.assertFalse(app.sections["sin2psi.summary"].grid_info())
 
             app.variables["sin2psi.action"].set("correction")
             app.variables["sin2psi.correction_method"].set("polynomial")
@@ -1454,11 +1549,20 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertTrue(app.sections["sin2psi.exclusions"].grid_info())
             self.assertFalse(app.sections["sin2psi.stress"].grid_info())
             self.assertTrue(app.sections["sin2psi.calibration"].grid_info())
+            self.assertFalse(app.sections["sin2psi.summary"].grid_info())
             self.assertTrue(app.widgets["sin2psi.correction_degree"][0].grid_info())
 
             app.variables["sin2psi.correction_method"].set("gaussian_process")
             app._update_sin2psi_mode()
             self.assertFalse(app.widgets["sin2psi.correction_degree"][0].grid_info())
+
+            app.variables["sin2psi.action"].set("summaries")
+            app._update_sin2psi_mode()
+            self.assertFalse(app.sections["sin2psi.peak_options"].grid_info())
+            self.assertFalse(app.sections["sin2psi.exclusions"].grid_info())
+            self.assertFalse(app.sections["sin2psi.stress"].grid_info())
+            self.assertFalse(app.sections["sin2psi.calibration"].grid_info())
+            self.assertTrue(app.sections["sin2psi.summary"].grid_info())
 
             with mock.patch.object(gui_app.proc, "generate_sin2psi_correction", return_value={"path": "correction.json", "plot_path": "correction.png"}) as generated:
                 captured = {}
@@ -1483,6 +1587,15 @@ class ProcessorSmokeTest(unittest.TestCase):
             app._update_plot_mode()
             self.assertEqual(app.variables["plot.type"].get(), "stress")
             self.assertNotEqual(app.widgets["plot.summary_csv"][1].cget("state"), "disabled")
+            self.assertEqual(app.widgets["plot.summary_csv"][0].cget("text"), "Summary CSV")
+            with mock.patch.object(gui_app.proc, "plot_sin2psi_gradients", return_value={"plot_path": "gradient.png"}) as gradient_plot:
+                app.variables["plot.type"].set("gradient")
+                app.variables["plot.data_dir"].set(str(self.repo_root))
+                app.variables["plot.x"].set("scan_number")
+                app.variables["plot.show_final"].set(False)
+                app.variables["plot.save_final"].set(False)
+                app.run_plotting()
+                self.assertNotIn("secondary_y", gradient_plot.call_args.kwargs)
             app.variables["plot.type"].set("spectra")
             app._update_plot_mode()
             self.assertEqual(app.widgets["plot.summary_csv"][1].cget("state"), "disabled")
