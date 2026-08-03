@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -235,6 +237,7 @@ class XRDGuiApp(ttk.Frame):
         self.twotheta_calibration_file = tk.StringVar(value=self.settings.get("twotheta_calibration_file", ""))
         self.status_var = tk.StringVar(value="Ready")
         self._syncing_energy_wavelength = False
+        self._syncing_outlier_preset = False
         self.cancel_event = threading.Event()
         self.task_running = False
         self._configure_master()
@@ -621,7 +624,44 @@ class XRDGuiApp(ttk.Frame):
         ac_like = lattice_type in {"hcp", "tetragonal"}
         self._set_enabled(["calibration.b"], (not is_lab6) and not cubic_like and not ac_like)
         self._set_enabled(["calibration.c"], (not is_lab6) and not cubic_like)
+        outlier_mode = self.variables.get("calibration.outlier_mode")
+        mode = outlier_mode.get() if outlier_mode is not None else "off"
+        threshold_enabled = mode in {"automatic", "review"}
+        manual_enabled = mode == "manual"
+        self._set_enabled(["calibration.outlier_sensitivity"], threshold_enabled)
+        self._set_enabled(
+            [
+                "calibration.offset_floor",
+                "calibration.caglioti_floor",
+                "calibration.max_fwhm_multiplier",
+                "calibration.max_outlier_fraction",
+            ],
+            threshold_enabled,
+        )
+        self._set_enabled(["calibration.manual_exclusions"], manual_enabled)
         self.set_status(f"Calibration source: {source_type}")
+
+    def _autofill_calibration_outlier_preset(self):
+        if self._syncing_outlier_preset or "calibration.outlier_sensitivity" not in self.variables:
+            return
+        sensitivity = self.variables["calibration.outlier_sensitivity"].get()
+        preset = tth_cal.OUTLIER_SENSITIVITY_PRESETS.get(sensitivity)
+        if not preset:
+            return
+        mapping = {
+            "calibration.offset_floor": "offset_floor",
+            "calibration.caglioti_floor": "caglioti_floor",
+            "calibration.max_fwhm_multiplier": "max_fwhm_multiplier",
+            "calibration.max_outlier_fraction": "max_outlier_fraction",
+        }
+        self._syncing_outlier_preset = True
+        try:
+            for gui_key, preset_key in mapping.items():
+                if gui_key in self.variables:
+                    self._set_variable_value(gui_key, f"{preset[preset_key]:g}")
+        finally:
+            self._syncing_outlier_preset = False
+        self.set_status(f"Calibration outlier sensitivity: {sensitivity}")
 
     def _update_sort_mode(self):
         mode = self.variables["sort.mode"].get()
@@ -1047,6 +1087,26 @@ class XRDGuiApp(ttk.Frame):
             self.master.update_idletasks()
         else:
             self.master.after(0, lambda msg=message: self.log(msg))
+
+    def _call_on_main_sync(self, func):
+        if threading.current_thread() is threading.main_thread():
+            return func()
+        done = threading.Event()
+        result = {"value": None, "error": None}
+
+        def runner():
+            try:
+                result["value"] = func()
+            except Exception as exc:
+                result["error"] = exc
+            finally:
+                done.set()
+
+        self.master.after(0, runner)
+        done.wait()
+        if result["error"] is not None:
+            raise result["error"]
+        return result["value"]
 
     def _ensure_interactive_matplotlib(self):
         try:
@@ -1551,6 +1611,222 @@ class XRDGuiApp(ttk.Frame):
             paths = [text]
         return paths
 
+    def _calibration_outlier_options(self):
+        return {
+            "offset_floor": self._optional_float("calibration.offset_floor"),
+            "caglioti_floor": self._optional_float("calibration.caglioti_floor"),
+            "max_fwhm_multiplier": self._optional_float("calibration.max_fwhm_multiplier"),
+            "max_outlier_fraction": self._optional_float("calibration.max_outlier_fraction"),
+        }
+
+    def _calibration_manual_exclusions(self):
+        text = self._get("calibration.manual_exclusions")
+        if not text:
+            return None
+        return [part.strip() for part in re.split(r"[;,]\s*|\s+", text) if part.strip()]
+
+    def _review_calibration_outliers(self, fitted_peaks, outlier_summary):
+        usable = [peak for peak in fitted_peaks if peak.get("usable")]
+        if not usable:
+            return {"offset": [], "caglioti": []}
+
+        def fmt(value):
+            try:
+                if value is None:
+                    return ""
+                value = float(value)
+                if not math.isfinite(value):
+                    return ""
+                return f"{value:.5g}"
+            except Exception:
+                return str(value or "")
+
+        proposed_offset = {str(peak.get("peak_index")) for peak in usable if peak.get("offset_fit_outlier")}
+        proposed_caglioti = {str(peak.get("peak_index")) for peak in usable if peak.get("caglioti_fit_outlier")}
+
+        review_fig = None
+        try:
+            self._ensure_interactive_matplotlib()
+            import matplotlib.pyplot as plt
+
+            offset_coeffs = tth_cal.fit_offset_polynomial(
+                fitted_peaks,
+                degree=self._optional_int("calibration.polynomial_degree") if self._get("calibration.polynomial_degree") else 2,
+            )
+            caglioti = tth_cal.fit_caglioti(fitted_peaks)
+            review_fig = tth_cal._plot_fit_curves(
+                None,
+                fitted_peaks,
+                offset_coeffs,
+                caglioti,
+                "Proposed calibration exclusions",
+                show=False,
+                save=False,
+            )
+            review_fig.canvas.manager.set_window_title("Proposed calibration exclusions")
+            review_fig.show()
+            plt.show(block=False)
+            self.log("Displayed proposed calibration exclusions plot.")
+        except Exception as exc:
+            self.log(f"Could not create review plot: {exc}")
+
+        self.log("Opening calibration exclusion review.")
+        parent = self.calibration_window if self.calibration_window is not None and self.calibration_window.winfo_exists() else self.master
+        dialog = tk.Toplevel(parent)
+        dialog.title("Review Calibration Exclusions")
+        dialog.transient(parent)
+        dialog.geometry("980x520")
+        self._apply_window_icon(dialog)
+        dialog.attributes("-topmost", True)
+
+        ttk.Label(
+            dialog,
+            text=(
+                "Review fitted calibration peaks. Checked boxes are excluded from the corresponding final fit and "
+                "recorded in the calibration JSON."
+            ),
+            wraplength=940,
+        ).pack(anchor="w", padx=12, pady=(12, 6))
+
+        frame = ttk.Frame(dialog)
+        frame.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        canvas = tk.Canvas(frame, highlightthickness=0)
+        yscroll = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        table = ttk.Frame(canvas)
+        table.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=table, anchor="nw")
+        canvas.configure(yscrollcommand=yscroll.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+
+        headers = ["Offset", "Caglioti", "Idx", "HKL", "Expected 2theta", "Observed 2theta", "Offset", "FWHM", "Proposed"]
+        widths = [8, 8, 6, 8, 16, 16, 12, 12, 18]
+        for col, (header, width) in enumerate(zip(headers, widths)):
+            ttk.Label(table, text=header, width=width).grid(row=0, column=col, sticky="w", padx=(0, 6), pady=(0, 4))
+
+        offset_vars = {}
+        caglioti_vars = {}
+        for row_idx, peak in enumerate(usable, start=1):
+            key = str(peak.get("peak_index"))
+            proposed = []
+            if key in proposed_offset:
+                proposed.append("offset")
+            if key in proposed_caglioti:
+                proposed.append("Caglioti")
+            offset_var = tk.BooleanVar(value=key in proposed_offset)
+            caglioti_var = tk.BooleanVar(value=key in proposed_caglioti)
+            offset_vars[key] = offset_var
+            caglioti_vars[key] = caglioti_var
+            values = [
+                ttk.Checkbutton(table, variable=offset_var),
+                ttk.Checkbutton(table, variable=caglioti_var),
+                ttk.Label(table, text=key, width=6),
+                ttk.Label(table, text=str(peak.get("hkl", "")), width=8),
+                ttk.Label(table, text=fmt(peak.get("expected_two_theta")), width=16),
+                ttk.Label(table, text=fmt(peak.get("center")), width=16),
+                ttk.Label(table, text=fmt(peak.get("offset")), width=12),
+                ttk.Label(table, text=fmt(peak.get("fwhm")), width=12),
+                ttk.Label(table, text=", ".join(proposed) if proposed else "-", width=18),
+            ]
+            for col, widget in enumerate(values):
+                widget.grid(row=row_idx, column=col, sticky="w", padx=(0, 6), pady=1)
+
+        result = {"accepted": False, "selection": None}
+
+        def close_review_plot():
+            if review_fig is None:
+                return
+            try:
+                import matplotlib.pyplot as plt
+
+                plt.close(review_fig)
+            except Exception:
+                pass
+
+        def accept():
+            result["accepted"] = True
+            result["selection"] = {
+                "offset": [key for key, var in offset_vars.items() if var.get()],
+                "caglioti": [key for key, var in caglioti_vars.items() if var.get()],
+            }
+            close_review_plot()
+            dialog.destroy()
+
+        def clear_all():
+            for var in list(offset_vars.values()) + list(caglioti_vars.values()):
+                var.set(False)
+
+        def cancel():
+            close_review_plot()
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.pack(anchor="e", padx=12, pady=(0, 12))
+        ttk.Button(buttons, text="Use Selected Exclusions", command=accept).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(buttons, text="Clear All", command=clear_all).grid(row=0, column=1, padx=(0, 8))
+        ttk.Button(buttons, text="Cancel Calibration", command=cancel).grid(row=0, column=2)
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        dialog.update_idletasks()
+        dialog.lift()
+        dialog.focus_set()
+        dialog.after(500, lambda: dialog.attributes("-topmost", False) if dialog.winfo_exists() else None)
+        self.log("Waiting for calibration exclusion review.")
+        self.master.wait_window(dialog)
+        if not result["accepted"]:
+            raise RuntimeError("Calibration cancelled during exclusion review")
+
+        self.log(
+            f"Calibration exclusion review accepted "
+            f"{len(result['selection']['offset'])} offset and {len(result['selection']['caglioti'])} Caglioti exclusions."
+        )
+        return result["selection"]
+
+    def _show_image_paths(self, paths):
+        paths = [Path(path) for path in paths if path and Path(path).exists()]
+        if not paths:
+            return
+        try:
+            self._ensure_interactive_matplotlib()
+            import matplotlib.pyplot as plt
+
+            for path in paths:
+                image = plt.imread(path)
+                height, width = image.shape[:2]
+                aspect = width / max(height, 1)
+                fig_width = min(13.5, max(7.0, 8.5 * aspect))
+                fig_height = min(11.5, max(5.0, fig_width / max(aspect, 1e-6)))
+                fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+                ax.imshow(image)
+                ax.set_axis_off()
+                fig.canvas.manager.set_window_title(path.name)
+                fig.tight_layout()
+            plt.show(block=False)
+        except Exception as exc:
+            self.log(f"Could not display calibration plots: {exc}")
+
+    def _show_calibration_result_plots(self, result):
+        figs = [result.get("profile_fig"), result.get("fit_fig")] if isinstance(result, dict) else []
+        figs = [fig for fig in figs if fig is not None]
+        if figs:
+            try:
+                self._ensure_interactive_matplotlib()
+                import matplotlib.pyplot as plt
+
+                for fig, title in zip(figs, ["Calibration profile", "Calibration fits"]):
+                    try:
+                        fig.canvas.manager.set_window_title(title)
+                    except Exception:
+                        pass
+                    fig.show()
+                plt.show(block=False)
+                return
+            except Exception as exc:
+                self.log(f"Could not display calibration figures: {exc}")
+        paths = [result.get("profile_plot"), result.get("fit_plot")] if isinstance(result, dict) else []
+        self._show_image_paths(paths)
+
     def _apply_generated_calibration(self, result):
         path = result.get("path") if isinstance(result, dict) else None
         if not path:
@@ -1561,6 +1837,14 @@ class XRDGuiApp(ttk.Frame):
         self.log(f"2theta calibration selected and enabled: {path}")
 
     def run_twotheta_calibration(self):
+        outlier_mode = self._get("calibration.outlier_mode") if "calibration.outlier_mode" in self.variables else "off"
+        show_plots_requested = self._bool("calibration.show_plots")
+        backend_show_plots = show_plots_requested and outlier_mode != "review"
+
+        def review_callback(fitted_peaks, outlier_summary):
+            self._emit_task_log("2theta Calibration: opening exclusion review")
+            return self._review_calibration_outliers(fitted_peaks, outlier_summary)
+
         def task():
             result = tth_cal.build_twotheta_calibration(
                 self._calibration_input_paths(),
@@ -1576,8 +1860,15 @@ class XRDGuiApp(ttk.Frame):
                 polynomial_degree=self._optional_int("calibration.polynomial_degree") if self._get("calibration.polynomial_degree") else 2,
                 max_index=self._optional_int("calibration.max_index") or 8,
                 fit_window=self._optional_float("calibration.fit_window") or 0.35,
-                discard_outliers=self._bool("calibration.discard_outliers"),
-                show_plots=self._bool("calibration.show_plots"),
+                discard_outliers=False,
+                outlier_mode=outlier_mode,
+                outlier_sensitivity=self._get("calibration.outlier_sensitivity"),
+                outlier_options=self._calibration_outlier_options(),
+                manual_exclusions=self._calibration_manual_exclusions(),
+                outlier_review_callback=review_callback if outlier_mode == "review" else None,
+                progress_callback=self._emit_task_log,
+                return_figures=show_plots_requested and outlier_mode == "review",
+                show_plots=backend_show_plots,
                 flat_file_directory=self._optional_path("calibration.flat_dir") or "./flat/",
                 flat_file_numbers=self._parse_int_list(self._get("calibration.flat_scans"), required=False),
             )
@@ -1591,8 +1882,12 @@ class XRDGuiApp(ttk.Frame):
         self._run_task(
             "2theta Calibration",
             task,
-            on_success=lambda result: (self._apply_generated_calibration(result), self._log_result_paths(result)),
-            run_on_main=self._bool("calibration.show_plots"),
+            on_success=lambda result: (
+                self._apply_generated_calibration(result),
+                self._log_result_paths(result),
+                self._show_calibration_result_plots(result) if show_plots_requested and outlier_mode == "review" else None,
+            ),
+            run_on_main=backend_show_plots or outlier_mode == "review",
         )
 
     def extract_and_apply_twotheta_correction(self):
@@ -2136,12 +2431,38 @@ class XRDGuiApp(ttk.Frame):
         self._entry(fitting, 0, "Polynomial degree", "calibration.polynomial_degree", "Degree for offset-vs-2theta polynomial; 0 is allowed.", default="2")
         self._entry(fitting, 1, "Max hkl index", "calibration.max_index", "Maximum h/k/l index to enumerate.", default="8")
         self._entry(fitting, 2, "Fit window", "calibration.fit_window", "Half-width in 2theta degrees around each predicted peak.", default="1.00")
-        self._checkbox(fitting, 3, "Discard fit outliers", "calibration.discard_outliers", "Conservatively exclude clear outlier peaks from the offset polynomial and Caglioti broadening fits. Excluded points are still plotted in cyan.", optional=True, default=False)
-        self._checkbox(fitting, 4, "Show plots", "calibration.show_plots", "Display generated calibration plots interactively.", optional=True, default=True)
+        self._combo(
+            fitting,
+            3,
+            "Outlier mode",
+            "calibration.outlier_mode",
+            ["review", "automatic", "manual", "off"],
+            "review: propose automatic exclusions and let you confirm/edit. automatic: apply thresholds directly. manual: use typed exclusions only. off: use all usable peaks.",
+            "review",
+        )
+        self._combo(
+            fitting,
+            4,
+            "Outlier sensitivity",
+            "calibration.outlier_sensitivity",
+            ["conservative", "normal", "aggressive"],
+            "Controls automatic residual thresholds. Conservative excludes fewer points; aggressive excludes more.",
+            "normal",
+            optional=True,
+        )
+        normal_preset = tth_cal.OUTLIER_SENSITIVITY_PRESETS["normal"]
+        self._entry(fitting, 5, "Offset floor", "calibration.offset_floor", "Advanced: minimum offset residual in 2theta degrees before automatic exclusion.", optional=True, default=f"{normal_preset['offset_floor']:g}")
+        self._entry(fitting, 6, "FWHM floor", "calibration.caglioti_floor", "Advanced: minimum FWHM residual in degrees before automatic Caglioti exclusion.", optional=True, default=f"{normal_preset['caglioti_floor']:g}")
+        self._entry(fitting, 7, "Max FWHM multiplier", "calibration.max_fwhm_multiplier", "Advanced: broad peaks above this multiple of median FWHM can be proposed for exclusion.", optional=True, default=f"{normal_preset['max_fwhm_multiplier']:g}")
+        self._entry(fitting, 8, "Max excluded fraction", "calibration.max_outlier_fraction", "Advanced: maximum fraction of peaks automatic exclusion may remove.", optional=True, default=f"{normal_preset['max_outlier_fraction']:g}")
+        self._entry(fitting, 9, "Manual exclusions", "calibration.manual_exclusions", "Manual mode only: HKL keys or peak indices separated by commas/spaces, e.g. 011, 222, 7.", optional=True, placeholder="e.g. 011, 222, 7")
+        self._checkbox(fitting, 10, "Show plots", "calibration.show_plots", "Display generated calibration plots interactively after fitting.", optional=True, default=True)
 
         source.trace_add("write", lambda *_: self._update_calibration_mode())
         self.variables["calibration.material"].trace_add("write", lambda *_: self._update_calibration_mode())
         self.variables["calibration.lattice_type"].trace_add("write", lambda *_: self._update_calibration_mode())
+        self.variables["calibration.outlier_mode"].trace_add("write", lambda *_: self._update_calibration_mode())
+        self.variables["calibration.outlier_sensitivity"].trace_add("write", lambda *_: self._autofill_calibration_outlier_preset())
         self._link_energy_wavelength_fields("calibration.wavelength", "calibration.energy")
         self._update_calibration_mode()
         buttons = ttk.Frame(parent)
@@ -2615,13 +2936,16 @@ class XRDGuiApp(ttk.Frame):
                 "LaB6 autofills a cubic lattice with a = 4.25695 Angstrom. Custom lets you choose lattice type and lattice parameters.\n"
                 "Energy and wavelength are linked; if both are blank, quixrd tries to read energy from the input metadata.\n"
                 "Polynomial degree controls the fitted offset-vs-2theta curve. Degree 0 is allowed for a constant offset.\n"
-                "Discard fit outliers applies a conservative post-fit exclusion to the calibration fits. For the offset polynomial, "
-                "quixrd first fits the offset curve, calculates each peak's residual from that curve, and excludes only points whose "
-                "residual is large compared with the robust median absolute deviation and an absolute floor. For the Caglioti FWHM "
-                "curve, quixrd similarly checks FWHM residuals after iterative refitting and also catches clearly too-broad peaks. "
-                "At most a small fraction of peaks can be excluded automatically, so this is intended to remove obvious bad fits, "
-                "not to tune the calibration aggressively. Excluded points are still shown on the fit plot in cyan; blue points are "
-                "used in the fit and orange lines are the fitted polynomial/Caglioti models.\n"
+                "Outlier mode controls peak exclusions for the offset polynomial and Caglioti broadening fits. Review proposes "
+                "automatic exclusions first, then opens a table for you to accept or edit them. Automatic applies the same "
+                "thresholds without stopping. Manual uses only the HKL keys or peak indices typed in Manual exclusions. Off uses "
+                "every usable fitted peak.\n"
+                "Outlier sensitivity controls the automatic thresholds. Conservative excludes fewer peaks, normal is the default, "
+                "and aggressive excludes more. Advanced fields can override the minimum offset residual, minimum FWHM residual, "
+                "broad-peak FWHM multiplier, and maximum fraction of fitted peaks that automatic mode may remove.\n"
+                "All exclusions are traceable in the calibration JSON, including mode, thresholds, excluded hkl/2theta/FWHM, and "
+                "whether each exclusion came from automatic filtering, review, or manual selection. Excluded points are still shown "
+                "on the final fit plot in cyan; blue points are used in the fit and orange lines are the fitted polynomial/Caglioti models.\n"
                 "Generate Calibration writes the JSON, combined TXT/CSV profile, profile plot with predicted hkl/multiplicity labels, "
                 "and fit plot with the offset polynomial and Caglioti FWHM curve.\n"
                 "Extract and Apply Corrections enables default 2theta calibration application and switches to the Extraction tab.\n",

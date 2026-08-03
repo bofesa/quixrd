@@ -386,6 +386,47 @@ class ProcessorSmokeTest(unittest.TestCase):
         self.assertTrue(fitted[4]["offset_fit_outlier"])
         self.assertTrue(fitted[7]["caglioti_fit_outlier"])
 
+    def test_calibration_outlier_modes_are_traceable(self):
+        fitted = []
+        for idx, expected in enumerate(np.linspace(20.0, 90.0, 10)):
+            fitted.append(
+                {
+                    "usable": True,
+                    "peak_index": idx,
+                    "hkl": f"{idx}00",
+                    "label": f"({idx}00)",
+                    "expected_two_theta": float(expected),
+                    "center": float(expected + 0.05),
+                    "offset": float(0.05 + (0.45 if idx == 4 else 0.0)),
+                    "center_err": 0.002,
+                    "fwhm": float(0.1 + (0.5 if idx == 7 else 0.0)),
+                    "fwhm_err": 0.002,
+                }
+            )
+
+        manual = tth_cal.annotate_calibration_fit_outliers(
+            fitted,
+            polynomial_degree=1,
+            outlier_mode="manual",
+            manual_exclusions={"offset": ["4"], "caglioti": ["700"]},
+        )
+        self.assertEqual(manual["mode"], "manual")
+        self.assertEqual(manual["offset_outliers"], 1)
+        self.assertEqual(manual["caglioti_outliers"], 1)
+        self.assertEqual(fitted[4]["offset_outlier_reason"], "manual")
+        self.assertEqual(fitted[7]["caglioti_outlier_reason"], "manual")
+        self.assertEqual(len(manual["excluded_peaks"]), 2)
+        self.assertIn("thresholds", manual)
+
+        reviewed = tth_cal.apply_reviewed_calibration_outliers(
+            fitted,
+            {"offset": ["4"], "caglioti": []},
+            options=manual["thresholds"],
+        )
+        self.assertEqual(reviewed["mode"], "review")
+        self.assertEqual(reviewed["offset_outliers"], 1)
+        self.assertEqual(reviewed["caglioti_outliers"], 0)
+
     def test_spinodal_two_peak_fit_and_series_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1405,6 +1446,10 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertTrue(calibration_window.winfo_exists())
             self.assertIn("calibration.input_paths", app.variables)
             self.assertEqual(app.open_calibration_window(), calibration_window)
+            self.assertEqual(app.variables["calibration.offset_floor"].get(), "0.05")
+            app.variables["calibration.outlier_sensitivity"].set("conservative")
+            self.assertEqual(app.variables["calibration.offset_floor"].get(), "0.08")
+            self.assertEqual(app.variables["calibration.max_fwhm_multiplier"].get(), "2.2")
 
             app.variables["calibration.material"].set("LaB6 (cubic, Pm-3m)")
             app._update_calibration_mode()
@@ -1440,11 +1485,19 @@ class ProcessorSmokeTest(unittest.TestCase):
                 app.variables["calibration.input_paths"].set(str(Path(tmp) / "a.txt") + ";" + str(Path(tmp) / "b.txt"))
                 app.variables["calibration.output_dir"].set(str(Path(tmp) / "calibration"))
                 app.variables["calibration.wavelength"].set("1.0")
-                app.variables["calibration.discard_outliers"].set(True)
+                app.variables["calibration.outlier_mode"].set("manual")
+                app.variables["calibration.outlier_sensitivity"].set("aggressive")
+                app.variables["calibration.offset_floor"].set("0.03")
+                app.variables["calibration.manual_exclusions"].set("011, 222")
                 app.variables["calibration.show_plots"].set(False)
                 app.run_twotheta_calibration()
                 self.assertEqual(len(generated_calibration.call_args.args[0]), 2)
-                self.assertTrue(generated_calibration.call_args.kwargs["discard_outliers"])
+                self.assertFalse(generated_calibration.call_args.kwargs["discard_outliers"])
+                self.assertEqual(generated_calibration.call_args.kwargs["outlier_mode"], "manual")
+                self.assertEqual(generated_calibration.call_args.kwargs["outlier_sensitivity"], "aggressive")
+                self.assertEqual(generated_calibration.call_args.kwargs["outlier_options"]["offset_floor"], 0.03)
+                self.assertEqual(generated_calibration.call_args.kwargs["manual_exclusions"], ["011", "222"])
+                self.assertIsNotNone(generated_calibration.call_args.kwargs["progress_callback"])
                 self.assertEqual(app.twotheta_calibration_file.get(), "calibration.json")
                 self.assertTrue(app.apply_twotheta_calibration_var.get())
 

@@ -593,6 +593,7 @@ def fit_calibration_peaks(
     peaks: Sequence[PredictedPeak],
     fit_window=0.35,
     initial_shift=None,
+    progress_callback=None,
 ):
     fitted = []
     assignment_window = max(float(fit_window), 2.0)
@@ -616,7 +617,10 @@ def fit_calibration_peaks(
         )
         initial_shift_summary["initial_shift"] = initial_shift
     assignments_by_peak = {match["peak_index"]: match for match in assignments}
+    total = len(peaks)
     for peak_index, peak in enumerate(peaks):
+        if progress_callback and (peak_index == 0 or peak_index + 1 == total or (peak_index + 1) % 10 == 0):
+            progress_callback(f"Fitting calibration peak {peak_index + 1} of {total}")
         try:
             assignment = assignments_by_peak.get(peak_index)
             if assignment is None:
@@ -650,6 +654,7 @@ def fit_calibration_peaks(
             result = {"error": str(exc)}
             usable = False
         row = {
+            "peak_index": int(peak_index),
             "hkl": "".join(str(v) for v in (peak.hkl or ())),
             "label": peak.label,
             "multiplicity": peak.intensity,
@@ -715,35 +720,187 @@ def _robust_outlier_mask(residuals, sigma=4.0, absolute_floor=0.0):
     return mask
 
 
-def annotate_calibration_fit_outliers(fitted_peaks, polynomial_degree=2, discard_outliers=False):
+OUTLIER_SENSITIVITY_PRESETS = {
+    "conservative": {
+        "offset_sigma": 4.5,
+        "offset_floor": 0.08,
+        "caglioti_sigma": 4.0,
+        "caglioti_floor": 0.04,
+        "max_fwhm_multiplier": 2.2,
+        "max_outlier_fraction": 0.15,
+    },
+    "normal": {
+        "offset_sigma": 3.8,
+        "offset_floor": 0.05,
+        "caglioti_sigma": 3.2,
+        "caglioti_floor": 0.02,
+        "max_fwhm_multiplier": 1.9,
+        "max_outlier_fraction": 0.25,
+    },
+    "aggressive": {
+        "offset_sigma": 2.5,
+        "offset_floor": 0.02,
+        "caglioti_sigma": 2.2,
+        "caglioti_floor": 0.01,
+        "max_fwhm_multiplier": 1.4,
+        "max_outlier_fraction": 0.45,
+    },
+}
+
+
+def normalise_outlier_options(sensitivity="normal", options=None):
+    sensitivity = str(sensitivity or "normal").lower()
+    merged = dict(OUTLIER_SENSITIVITY_PRESETS.get(sensitivity, OUTLIER_SENSITIVITY_PRESETS["normal"]))
+    if options:
+        for key, value in options.items():
+            if value in (None, ""):
+                continue
+            if key == "sensitivity":
+                continue
+            merged[key] = float(value)
+    merged["sensitivity"] = sensitivity
+    merged["max_outlier_fraction"] = max(0.0, min(1.0, float(merged["max_outlier_fraction"])))
+    return merged
+
+
+def _outlier_limit(count, options, minimum=1):
+    return max(int(minimum), int(np.floor(float(options["max_outlier_fraction"]) * int(count))))
+
+
+def _manual_exclusion_sets(manual_exclusions=None):
+    if not manual_exclusions:
+        return {"offset": set(), "caglioti": set()}
+    if isinstance(manual_exclusions, str):
+        values = {item.strip() for item in re.split(r"[;,]\s*|\s+", manual_exclusions) if item.strip()}
+        return {"offset": values, "caglioti": values}
+    if isinstance(manual_exclusions, dict):
+        shared = manual_exclusions.get("all") or manual_exclusions.get("both") or []
+        offset = manual_exclusions.get("offset") or []
+        caglioti = manual_exclusions.get("caglioti") or []
+        return {
+            "offset": {str(value).strip() for value in list(shared) + list(offset) if str(value).strip()},
+            "caglioti": {str(value).strip() for value in list(shared) + list(caglioti) if str(value).strip()},
+        }
+    values = {str(value).strip() for value in manual_exclusions if str(value).strip()}
+    return {"offset": values, "caglioti": values}
+
+
+def _peak_keys(peak):
+    keys = {str(peak.get("peak_index", "")), str(peak.get("hkl", "")).strip(), str(peak.get("label", "")).strip()}
+    hkl = peak.get("hkl")
+    if isinstance(hkl, (list, tuple)):
+        keys.add("".join(str(int(value)) for value in hkl))
+    return {key for key in keys if key}
+
+
+def _manual_matches(peak, values):
+    return bool(_peak_keys(peak) & set(values))
+
+
+def _excluded_peak_row(peak, fit_name):
+    return {
+        "peak_index": peak.get("peak_index"),
+        "hkl": peak.get("hkl"),
+        "label": peak.get("label"),
+        "expected_two_theta": peak.get("expected_two_theta"),
+        "observed_two_theta": peak.get("center"),
+        "offset": peak.get("offset"),
+        "fwhm": peak.get("fwhm"),
+        "fit": fit_name,
+        "reason": peak.get(f"{fit_name}_outlier_reason", "automatic"),
+        "residual": peak.get(f"{fit_name}_fit_residual"),
+    }
+
+
+def summarise_calibration_outliers(fitted_peaks, enabled, mode, options):
+    offset = [_excluded_peak_row(peak, "offset") for peak in fitted_peaks if peak.get("offset_fit_outlier")]
+    caglioti = [_excluded_peak_row(peak, "caglioti") for peak in fitted_peaks if peak.get("caglioti_fit_outlier")]
+    return {
+        "enabled": bool(enabled),
+        "mode": str(mode),
+        "thresholds": options,
+        "offset_outliers": len(offset),
+        "caglioti_outliers": len(caglioti),
+        "excluded_peaks": offset + caglioti,
+    }
+
+
+def apply_reviewed_calibration_outliers(fitted_peaks, selection, options=None):
+    options = normalise_outlier_options(options=(options or {}))
+    manual = _manual_exclusion_sets(selection)
+    for peak in fitted_peaks:
+        if not peak.get("usable"):
+            continue
+        auto_offset = peak.get("offset_fit_outlier") and peak.get("offset_outlier_reason") == "automatic"
+        auto_caglioti = peak.get("caglioti_fit_outlier") and peak.get("caglioti_outlier_reason") == "automatic"
+        offset_selected = _manual_matches(peak, manual["offset"])
+        caglioti_selected = _manual_matches(peak, manual["caglioti"])
+        peak["offset_fit_outlier"] = bool(offset_selected)
+        peak["caglioti_fit_outlier"] = bool(caglioti_selected)
+        if offset_selected:
+            peak["offset_outlier_reason"] = "automatic_reviewed" if auto_offset else "manual_review"
+        else:
+            peak.pop("offset_outlier_reason", None)
+        if caglioti_selected:
+            peak["caglioti_outlier_reason"] = "automatic_reviewed" if auto_caglioti else "manual_review"
+        else:
+            peak.pop("caglioti_outlier_reason", None)
+    return summarise_calibration_outliers(fitted_peaks, True, "review", options)
+
+
+def annotate_calibration_fit_outliers(
+    fitted_peaks,
+    polynomial_degree=2,
+    discard_outliers=False,
+    outlier_mode=None,
+    sensitivity="normal",
+    outlier_options=None,
+    manual_exclusions=None,
+):
+    mode = str(outlier_mode or ("automatic" if discard_outliers else "off")).lower()
+    if mode in {"none", "false"}:
+        mode = "off"
+    options = normalise_outlier_options(sensitivity=sensitivity, options=outlier_options)
+    automatic_enabled = mode in {"automatic", "review"} or (discard_outliers and mode == "off")
+    manual_enabled = mode == "manual"
+    if discard_outliers and mode == "off":
+        mode = "automatic"
     for peak in fitted_peaks:
         peak["offset_fit_outlier"] = False
         peak["caglioti_fit_outlier"] = False
         peak.pop("offset_fit_residual", None)
         peak.pop("caglioti_fit_residual", None)
-    if not discard_outliers:
-        return {"enabled": False, "offset_outliers": 0, "caglioti_outliers": 0}
+        peak.pop("offset_outlier_reason", None)
+        peak.pop("caglioti_outlier_reason", None)
+    if not automatic_enabled and not manual_enabled:
+        return summarise_calibration_outliers(fitted_peaks, False, "off", options)
 
     usable = [peak for peak in fitted_peaks if peak.get("usable")]
     degree = int(polynomial_degree)
-    if len(usable) > degree + 4:
+    if automatic_enabled and len(usable) > degree + 4:
         x = np.asarray([peak["expected_two_theta"] for peak in usable], dtype=float)
         y = np.asarray([peak["offset"] for peak in usable], dtype=float)
         coeffs = np.polyfit(x, y, min(degree, len(usable) - 1))
         residuals = y - np.polyval(coeffs, x)
-        outliers = _robust_outlier_mask(residuals, sigma=3.8, absolute_floor=0.05)
-        if outliers.sum() <= max(1, len(usable) // 4):
+        outliers = _robust_outlier_mask(residuals, sigma=options["offset_sigma"], absolute_floor=options["offset_floor"])
+        if outliers.sum() <= _outlier_limit(len(usable), options, 1):
             for peak, residual, is_outlier in zip(usable, residuals, outliers):
                 peak["offset_fit_residual"] = float(residual)
                 peak["offset_fit_outlier"] = bool(is_outlier)
+                if is_outlier:
+                    peak["offset_outlier_reason"] = "automatic"
 
     caglioti_candidates = [peak for peak in usable if np.isfinite(peak.get("fwhm", np.nan))]
-    if len(caglioti_candidates) >= 7:
+    if automatic_enabled and len(caglioti_candidates) >= 7:
         fwhm = np.asarray([peak["fwhm"] for peak in caglioti_candidates], dtype=float)
         median_fwhm = float(np.nanmedian(fwhm))
         fwhm_mad = float(np.nanmedian(np.abs(fwhm - median_fwhm)))
         fwhm_sigma = 1.4826 * fwhm_mad if np.isfinite(fwhm_mad) else 0.0
-        gross_threshold = max(3.5 * fwhm_sigma, 0.05, 0.9 * median_fwhm)
+        gross_threshold = max(
+            options["caglioti_sigma"] * fwhm_sigma,
+            options["caglioti_floor"],
+            max(0.0, options["max_fwhm_multiplier"] - 1.0) * median_fwhm,
+        )
         gross_fwhm_outliers = (fwhm - median_fwhm) > gross_threshold
         initial = None
         trial_keep = np.ones(len(caglioti_candidates), dtype=bool)
@@ -759,8 +916,12 @@ def annotate_calibration_fit_outliers(fitted_peaks, polynomial_degree=2, discard
             predicted_sq = initial["U"] * np.tan(theta) ** 2 + initial["V"] * np.tan(theta) + initial["W"]
             predicted = np.sqrt(np.maximum(predicted_sq, 0.0))
             residuals = fwhm - predicted
-            trial_outliers = _robust_outlier_mask(residuals, sigma=3.2, absolute_floor=0.02) | gross_fwhm_outliers
-            if trial_outliers.sum() > max(2, len(caglioti_candidates) // 4):
+            trial_outliers = _robust_outlier_mask(
+                residuals,
+                sigma=options["caglioti_sigma"],
+                absolute_floor=options["caglioti_floor"],
+            ) | gross_fwhm_outliers
+            if trial_outliers.sum() > _outlier_limit(len(caglioti_candidates), options, 2):
                 break
             new_keep = ~trial_outliers
             if np.array_equal(new_keep, trial_keep):
@@ -772,17 +933,29 @@ def annotate_calibration_fit_outliers(fitted_peaks, polynomial_degree=2, discard
             predicted_sq = initial["U"] * np.tan(theta) ** 2 + initial["V"] * np.tan(theta) + initial["W"]
             predicted = np.sqrt(np.maximum(predicted_sq, 0.0))
             residuals = fwhm - predicted
-            outliers = _robust_outlier_mask(residuals, sigma=3.2, absolute_floor=0.02) | gross_fwhm_outliers
-            if outliers.sum() <= max(2, len(caglioti_candidates) // 4):
+            outliers = _robust_outlier_mask(
+                residuals,
+                sigma=options["caglioti_sigma"],
+                absolute_floor=options["caglioti_floor"],
+            ) | gross_fwhm_outliers
+            if outliers.sum() <= _outlier_limit(len(caglioti_candidates), options, 2):
                 for peak, residual, is_outlier in zip(caglioti_candidates, residuals, outliers):
                     peak["caglioti_fit_residual"] = float(residual)
                     peak["caglioti_fit_outlier"] = bool(is_outlier)
+                    if is_outlier:
+                        peak["caglioti_outlier_reason"] = "automatic"
 
-    return {
-        "enabled": True,
-        "offset_outliers": sum(1 for peak in fitted_peaks if peak.get("offset_fit_outlier")),
-        "caglioti_outliers": sum(1 for peak in fitted_peaks if peak.get("caglioti_fit_outlier")),
-    }
+    if manual_enabled:
+        manual = _manual_exclusion_sets(manual_exclusions)
+        for peak in usable:
+            if _manual_matches(peak, manual["offset"]):
+                peak["offset_fit_outlier"] = True
+                peak["offset_outlier_reason"] = "manual"
+            if _manual_matches(peak, manual["caglioti"]):
+                peak["caglioti_fit_outlier"] = True
+                peak["caglioti_outlier_reason"] = "manual"
+
+    return summarise_calibration_outliers(fitted_peaks, True, mode, options)
 
 
 def evaluate_calibration(calibration, two_theta):
@@ -904,7 +1077,7 @@ def _save_calibration_figure(fig, path):
     return svg_path
 
 
-def _plot_combined_profile(path, combined, peaks, fitted_peaks, title, show=False):
+def _plot_combined_profile(path, combined, peaks, fitted_peaks, title, show=False, close=None):
     fig, ax = plt.subplots(figsize=(13.5, 7.5))
     ax.plot(combined["two_theta"], combined["intensity"], "-", linewidth=0.6, label="combined profile")
     x_min = float(np.nanmin(combined["two_theta"]))
@@ -972,12 +1145,14 @@ def _plot_combined_profile(path, combined, peaks, fitted_peaks, title, show=Fals
     ax.legend(fontsize=8)
     fig.tight_layout()
     _save_calibration_figure(fig, path)
-    if not show:
+    if close is None:
+        close = not show
+    if close:
         plt.close(fig)
     return fig
 
 
-def _plot_fit_curves(path, fitted_peaks, offset_coeffs, caglioti, title, show=False):
+def _plot_fit_curves(path, fitted_peaks, offset_coeffs, caglioti, title, show=False, save=True, close=None):
     used = [peak for peak in fitted_peaks if peak.get("usable")]
     offset_used = [peak for peak in used if not peak.get("offset_fit_outlier")]
     offset_excluded = [peak for peak in used if peak.get("offset_fit_outlier")]
@@ -1090,8 +1265,13 @@ def _plot_fit_curves(path, fitted_peaks, offset_coeffs, caglioti, title, show=Fa
     ax_fwhm.legend(fontsize=8)
     fig.suptitle(title)
     fig.tight_layout()
-    _save_calibration_figure(fig, path)
-    if not show:
+    if save:
+        if path is None:
+            raise ValueError("A path is required when save=True")
+        _save_calibration_figure(fig, path)
+    if close is None:
+        close = save and not show
+    if close:
         plt.close(fig)
     return fig
 
@@ -1156,6 +1336,13 @@ def build_twotheta_calibration(
     max_index=8,
     fit_window=0.35,
     discard_outliers=False,
+    outlier_mode=None,
+    outlier_sensitivity="normal",
+    outlier_options=None,
+    manual_exclusions=None,
+    outlier_review_callback=None,
+    progress_callback=None,
+    return_figures=False,
     show_plots=False,
     overlap="blend",
     flat_file_directory="./flat/",
@@ -1166,6 +1353,11 @@ def build_twotheta_calibration(
     source_type = str(source_type or "txt").lower()
     copied_sources = []
 
+    def progress(message):
+        if progress_callback:
+            progress_callback(message)
+
+    progress("Reading calibration input")
     if source_type == "nxs":
         exported = export_nxs_calibration_source(
             input_paths[0],
@@ -1189,6 +1381,7 @@ def build_twotheta_calibration(
                 shutil.copy2(path, target)
             copied_sources.append(str(target))
 
+    progress(f"Combining {len(profiles)} calibration profile(s)")
     combined = combine_profiles(profiles, overlap=overlap)
     metadata = combined["metadata"]
     energy = energy if energy not in (None, "") else metadata.get("energy") or metadata.get("Energy")
@@ -1198,6 +1391,7 @@ def build_twotheta_calibration(
     energy = energy if energy not in (None, "") else wavelength_to_energy(wavelength)
 
     lattice = _normalise_material(material, lattice_type=lattice_type, a=a, b=b, c=c)
+    progress("Predicting calibration peak positions")
     peaks = lattice_predicted_peaks(
         lattice["lattice_type"],
         lattice["a"],
@@ -1218,17 +1412,36 @@ def build_twotheta_calibration(
         )
         for peak in peaks
     ]
+    progress(f"Fitting {len(peaks)} predicted calibration peak(s)")
     fitted_peaks, initial_shift_summary = fit_calibration_peaks(
         combined["two_theta"],
         combined["intensity"],
         peaks,
         fit_window=fit_window,
+        progress_callback=progress,
     )
+    progress("Applying calibration outlier selection")
     outlier_summary = annotate_calibration_fit_outliers(
         fitted_peaks,
         polynomial_degree=polynomial_degree,
         discard_outliers=discard_outliers,
+        outlier_mode=outlier_mode,
+        sensitivity=outlier_sensitivity,
+        outlier_options=outlier_options,
+        manual_exclusions=manual_exclusions,
     )
+    resolved_outlier_mode = outlier_summary.get("mode", "off")
+    if resolved_outlier_mode == "review" and outlier_review_callback is not None:
+        progress("Waiting for calibration outlier review")
+        selection = outlier_review_callback(fitted_peaks, outlier_summary)
+        if selection is not None:
+            outlier_summary = apply_reviewed_calibration_outliers(
+                fitted_peaks,
+                selection,
+                options=outlier_summary.get("thresholds"),
+            )
+        progress("Calibration outlier review accepted")
+    progress("Fitting calibration offset and Caglioti curves")
     offset_coeffs = fit_offset_polynomial(fitted_peaks, degree=polynomial_degree)
     caglioti = fit_caglioti(fitted_peaks)
 
@@ -1251,6 +1464,7 @@ def build_twotheta_calibration(
     }
     _write_combined_txt(combined_txt, combined, {**metadata, **out_metadata})
     pd.DataFrame({"2theta": combined["two_theta"], "intensity": combined["intensity"]}).to_csv(combined_csv, index=False)
+    progress("Writing calibration plots")
     profile_fig = _plot_combined_profile(
         profile_plot,
         combined,
@@ -1258,6 +1472,7 @@ def build_twotheta_calibration(
         fitted_peaks,
         f"{lattice['material']} calibration profile",
         show=show_plots,
+        close=(not return_figures),
     )
     fit_fig = _plot_fit_curves(
         fit_plot,
@@ -1266,6 +1481,7 @@ def build_twotheta_calibration(
         caglioti,
         "2theta calibration fits",
         show=show_plots,
+        close=(not return_figures),
     )
     if show_plots:
         plt.show()
@@ -1283,6 +1499,10 @@ def build_twotheta_calibration(
         "overlap_policy": overlap,
         "initial_shift": initial_shift_summary,
         "discard_outliers": bool(discard_outliers),
+        "outlier_mode": outlier_summary.get("mode", resolved_outlier_mode),
+        "outlier_sensitivity": outlier_summary.get("thresholds", {}).get("sensitivity", outlier_sensitivity),
+        "outlier_thresholds": outlier_summary.get("thresholds", {}),
+        "manual_exclusions": manual_exclusions,
         "outlier_summary": outlier_summary,
         "polynomial_degree": int(polynomial_degree),
         "offset_polynomial_coefficients": offset_coeffs,
@@ -1297,7 +1517,7 @@ def build_twotheta_calibration(
     }
     with open(json_path, "w", encoding="utf-8") as fh:
         json.dump(calibration, fh, indent=2)
-    return {
+    result = {
         "path": str(json_path),
         "calibration": calibration,
         "combined_txt": str(combined_txt),
@@ -1307,3 +1527,7 @@ def build_twotheta_calibration(
         "fit_plot": str(fit_plot),
         "fit_plot_svg": str(fit_plot_svg),
     }
+    if return_figures:
+        result["profile_fig"] = profile_fig
+        result["fit_fig"] = fit_fig
+    return result
