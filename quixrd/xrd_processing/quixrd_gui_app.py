@@ -26,10 +26,12 @@ if __package__ in (None, ""):
     from quixrd.xrd_processing import sin2psi_processor as proc
     from quixrd.xrd_processing import spinodal_peak_analysis as peak_analysis
     from quixrd.xrd_processing import twotheta_calibration as tth_cal
+    from quixrd.xrd_processing import williamson_hall as wh
 else:
     from . import sin2psi_processor as proc
     from . import spinodal_peak_analysis as peak_analysis
     from . import twotheta_calibration as tth_cal
+    from . import williamson_hall as wh
 
 NXS_EXPORT_DIR = Path(__file__).resolve().parents[1] / "nxs_export"
 if str(NXS_EXPORT_DIR) not in sys.path:
@@ -44,13 +46,14 @@ SPECTRA_LABEL_OPTIONS = (
     ("temp", "Temperature", "Add the first-frame temperature metadata to legend labels."),
     ("time", "Start time", "Add the first-frame start time metadata to legend labels."),
 )
-TAB_NAMES = ["Extraction", "Plotting", "Sorting", "Peak Analysis", f"{SIN2PSI_LABEL} Analysis"]
+TAB_NAMES = ["Extraction", "Plotting", "Sorting", "Peak Analysis", "Williamson-Hall", f"{SIN2PSI_LABEL} Analysis"]
 TAB_PREFIXES = {
     "Extraction": ("extract.",),
     "Calibration": ("calibration.",),
     "Plotting": ("plot.",),
     "Sorting": ("sort.",),
     "Peak Analysis": ("peak.",),
+    "Williamson-Hall": ("wh.",),
     f"{SIN2PSI_LABEL} Analysis": ("sin2psi.",),
 }
 
@@ -287,6 +290,7 @@ class XRDGuiApp(ttk.Frame):
         self._build_plotting_tab(self.tabs["Plotting"])
         self._build_sorting_tab(self.tabs["Sorting"])
         self._build_peak_analysis_tab(self.tabs["Peak Analysis"])
+        self._build_williamson_hall_tab(self.tabs["Williamson-Hall"])
         self._build_sin2psi_tab(self.tabs[f"{SIN2PSI_LABEL} Analysis"])
         self._build_log_panel()
         self._build_status_bar()
@@ -700,6 +704,41 @@ class XRDGuiApp(ttk.Frame):
         else:
             self.set_status(f"Peak Analysis {'mode: replot' if action_value == 'replot' else 'scan type: ' + (scan_type or 'all')}")
 
+    def _update_wh_mode(self):
+        if "wh.target_source" not in self.variables:
+            return
+        target_source = self.variables["wh.target_source"].get()
+        profile_source = self.variables["wh.profile_source"].get()
+        scan_type = self.variables["wh.scan_type"].get()
+        lattice_type = self.variables["wh.lattice_type"].get()
+        lattice = target_source == "lattice"
+        self._set_widgets_visible(["wh.manual_two_theta"], not lattice)
+        self._set_widgets_visible(
+            [
+                "wh.lattice_type",
+                "wh.a",
+                "wh.b",
+                "wh.c",
+                "wh.phase_name",
+                "wh.max_index",
+                "wh.thermal_alpha",
+                "wh.reference_temperature",
+            ],
+            lattice,
+        )
+        self._set_widgets_visible(["wh.scan_type"], profile_source == "txt")
+        show_frame = profile_source == "csv" or (profile_source == "txt" and scan_type == "chi")
+        self._set_widgets_visible(["wh.frame_index"], show_frame)
+        self._set_enabled(["wh.frame_index"], show_frame)
+        cubic_like = lattice_type in {"cubic", "fcc", "bcc"}
+        self._set_enabled(["wh.b", "wh.c"], lattice and not cubic_like)
+        if cubic_like:
+            if "wh.b" in self.variables:
+                self.variables["wh.b"].set("")
+            if "wh.c" in self.variables:
+                self.variables["wh.c"].set("")
+        self.set_status("Williamson-Hall: lattice targets" if lattice else "Williamson-Hall: manual 2theta targets")
+
     def _update_sin2psi_mode(self):
         action = self.variables["sin2psi.action"].get()
         method = self.variables.get("sin2psi.correction_method")
@@ -761,6 +800,17 @@ class XRDGuiApp(ttk.Frame):
     def _browse(self, variable, browse, key=None):
         if browse == "directory":
             value = filedialog.askdirectory()
+        elif browse == "json":
+            value = filedialog.askopenfilename(
+                title="Select JSON file",
+                filetypes=[("JSON files", "*.json")],
+            )
+        elif browse == "json_multi":
+            values = filedialog.askopenfilenames(
+                title="Select JSON file(s)",
+                filetypes=[("JSON files", "*.json")],
+            )
+            value = "; ".join(values)
         elif browse == "calibration_input":
             source_type = self.variables.get("calibration.source_type")
             source_type = source_type.get() if source_type is not None else "txt"
@@ -800,6 +850,22 @@ class XRDGuiApp(ttk.Frame):
 
     def _optional_path(self, key):
         return self._get(key) or None
+
+    def _optional_json_path(self, key, label):
+        value = self._optional_path(key)
+        if value:
+            self._validate_json_paths(value, label)
+        return value
+
+    def _validate_json_paths(self, value, label):
+        for part in str(value or "").split(";"):
+            path_text = part.strip()
+            if not path_text:
+                continue
+            path = Path(path_text)
+            if path.suffix.lower() != ".json":
+                raise ValueError(f"{label} must be a .json file, not: {path}")
+        return True
 
     def _optional_float(self, key):
         value = self._get(key)
@@ -962,6 +1028,22 @@ class XRDGuiApp(ttk.Frame):
                 raise ValueError(f"No scans found in {data_dir}")
             return self._apply_every_nth(discovered, every_nth)
         return None
+
+    def _selected_wh_scans(self, data_dir, profile_source, scan_type, frame_index):
+        text = self._get("wh.scans")
+        every_nth = self._parse_every_nth(text)
+        scans = self._parse_int_list(text, required=False)
+        if scans:
+            return scans
+        discovered = wh.discover_scan_numbers(
+            data_dir,
+            profile_source=profile_source,
+            scan_type=scan_type,
+            frame_index=frame_index,
+        )
+        if not discovered:
+            raise ValueError(f"No matching Williamson-Hall scans found in {data_dir}")
+        return self._apply_every_nth(discovered, every_nth)
 
     def _format_derived_float(self, value):
         return f"{value:.8g}"
@@ -1253,7 +1335,15 @@ class XRDGuiApp(ttk.Frame):
 
     def import_parameters(self, path, scope="all"):
         path = Path(path)
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"Could not read parameter file as text: {path}. "
+                "Check that this path points to a JSON parameter file, not a plot/image file."
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid parameter JSON: {path}") from exc
         params = self._parameters_to_apply(payload, scope)
         applied = 0
         for key, value in params.items():
@@ -1389,9 +1479,10 @@ class XRDGuiApp(ttk.Frame):
         value = filedialog.askopenfilename(
             title="Select 2theta calibration JSON",
             initialdir=initial_dir,
-            filetypes=[("Calibration JSON", "*.json"), ("All files", "*.*")],
+            filetypes=[("Calibration JSON", "*.json")],
         )
         if value:
+            self._validate_json_paths(value, "2theta calibration file")
             self.twotheta_calibration_file.set(value)
             self._save_gui_settings()
             self.log(f"2theta calibration file selected: {value}")
@@ -1399,6 +1490,7 @@ class XRDGuiApp(ttk.Frame):
     def _twotheta_calibration_for_processing(self):
         path = self.twotheta_calibration_file.get().strip()
         if self.apply_twotheta_calibration_var.get() and path and Path(path).exists():
+            self._validate_json_paths(path, "2theta calibration file")
             return path
         return None
 
@@ -2126,6 +2218,98 @@ class XRDGuiApp(ttk.Frame):
             run_on_main=False,
         )
 
+    def run_williamson_hall(self):
+        def progress(message):
+            if threading.current_thread() is threading.main_thread():
+                self.log(message)
+                self.master.update_idletasks()
+            else:
+                self.master.after(0, lambda msg=message: self.log(msg))
+
+        try:
+            data_dir = self._required_path("wh.data_dir", "Data directory")
+            profile_source = self._get("wh.profile_source") or "txt"
+            scan_type = (self._get("wh.scan_type") or None) if profile_source == "txt" else None
+            frame_index = None
+            if profile_source == "csv" or scan_type == "chi":
+                frame_index = self._optional_int("wh.frame_index")
+                if frame_index is None and profile_source == "txt":
+                    frame_index = 0
+            scans = self._selected_wh_scans(data_dir, profile_source, scan_type, frame_index)
+        except Exception as exc:
+            messagebox.showerror("Williamson-Hall", str(exc), parent=self.master)
+            self.log(f"Williamson-Hall setup failed: {exc}")
+            return
+
+        target_source = self._get("wh.target_source") or "lattice"
+        calibration_json = self._optional_json_path("wh.twotheta_calibration_json", "2theta calibration JSON") or self._twotheta_calibration_for_processing()
+
+        def task():
+            return wh.run_williamson_hall_series(
+                data_dir=data_dir,
+                scans=scans,
+                profile_source=profile_source,
+                scan_type=scan_type,
+                frame_index=frame_index,
+                target_source=target_source,
+                manual_two_theta=self._get("wh.manual_two_theta"),
+                lattice_type=self._get("wh.lattice_type") or "cubic",
+                a=self._optional_float("wh.a"),
+                b=self._optional_float("wh.b"),
+                c=self._optional_float("wh.c"),
+                wavelength=self._optional_float("wh.wavelength"),
+                energy=self._optional_float("wh.energy"),
+                max_index=self._optional_int("wh.max_index") or 8,
+                phase_name=self._get("wh.phase_name"),
+                thermal_alpha=self._optional_float("wh.thermal_alpha"),
+                reference_temperature=self._optional_float("wh.reference_temperature"),
+                fit_window=self._optional_float("wh.fit_window") or 0.35,
+                shape_factor=self._optional_float("wh.shape_factor") or 0.9,
+                twotheta_calibration_json=calibration_json,
+                residual_shift_limit=self._optional_float("wh.residual_shift_limit") or 0.15,
+                registration_window=self._optional_float("wh.registration_window") or 2.0,
+                x=self._get("wh.x") or "scan_number",
+                secondary_y=self._get("wh.secondary_y"),
+                save=True,
+                show=False,
+                progress_callback=progress,
+                cancel_check=self.cancel_event.is_set,
+            )
+
+        scan_count = len(scans)
+        if scan_count > LARGE_FIT_SCAN_THRESHOLD and not self._confirm_large_job(
+            "Large Williamson-Hall Job",
+            f"Williamson-Hall analysis will fit multiple peaks in {scan_count} scan(s).\n\n"
+            "This can take several minutes. You can use Cancel Task to stop between scans, but the current peak fit must finish first.\n\n"
+            "Continue?",
+        ):
+            self.log("Williamson-Hall cancelled before fitting.")
+            return
+
+        def on_success(result):
+            self._log_result_paths(result)
+            if self._bool("wh.show_final") and isinstance(result, dict) and result.get("summary_path"):
+                self._show_wh_trend_from_csv(result["summary_path"])
+
+        self._run_task("Williamson-Hall", task, on_success=on_success, run_on_main=True)
+
+    def _show_wh_trend_from_csv(self, csv_path):
+        try:
+            self._ensure_interactive_matplotlib()
+            wh.plot_wh_trends_from_csv(
+                csv_path,
+                x=self._get("wh.x") or "scan_number",
+                save=False,
+                show=True,
+                secondary_y=self._get("wh.secondary_y"),
+            )
+            import matplotlib.pyplot as plt
+
+            plt.show(block=False)
+            self.log("Displayed Williamson-Hall trend plot.")
+        except Exception as exc:
+            self.log(f"Could not display Williamson-Hall trend plot: {exc}")
+
     def _manual_plot_save_dir(self):
         summary_csv = self._optional_path("plot.summary_csv")
         if summary_csv:
@@ -2169,7 +2353,7 @@ class XRDGuiApp(ttk.Frame):
             "exclude_chi_ranges": self._parse_ranges(self._get("sin2psi.exclude_chi")),
             "exclude_sin2psi_ranges": self._parse_ranges(self._get("sin2psi.exclude_sin2psi")),
             "auto_exclude": self._bool("sin2psi.auto_exclude"),
-            "correction_json": self._optional_path("sin2psi.correction_json"),
+            "correction_json": self._optional_json_path("sin2psi.correction_json", f"{SIN2PSI_LABEL} correction JSON"),
             "show": self._bool("sin2psi.show_final"),
         }
 
@@ -2291,7 +2475,7 @@ class XRDGuiApp(ttk.Frame):
             f"{SIN2PSI_LABEL} {action}",
             task,
             on_success=self._log_result_paths,
-            run_on_main=self._bool("sin2psi.show_final"),
+            run_on_main=action in {"process", "refit", "correction", "summaries"},
         )
 
     def _log_result_paths(self, result):
@@ -2302,8 +2486,10 @@ class XRDGuiApp(ttk.Frame):
                 "diagnostic_plot_path",
                 "path",
                 "csv_path",
+                "peaks_path",
                 "params_path",
                 "scan_dir",
+                "output_dir",
                 "combined_txt",
                 "combined_csv",
                 "profile_plot",
@@ -2321,6 +2507,13 @@ class XRDGuiApp(ttk.Frame):
                     self.log(f"diagnostic_plot_file: {path}")
                 if len(paths) > 5:
                     self.log(f"diagnostic_plot_file: ... {len(paths) - 5} more")
+            if result.get("wh_plot_paths"):
+                paths = result["wh_plot_paths"]
+                self.log(f"williamson_hall_plot_files: {len(paths)}")
+                for path in paths[:5]:
+                    self.log(f"williamson_hall_plot_file: {path}")
+                if len(paths) > 5:
+                    self.log(f"williamson_hall_plot_file: ... {len(paths) - 5} more")
 
     def preview_sin2psi(self, command_name="Preview First Scan"):
         action = self._get("sin2psi.action")
@@ -2695,6 +2888,156 @@ class XRDGuiApp(ttk.Frame):
         self.variables["peak.scan_type"].trace_add("write", lambda *_: self._update_peak_mode())
         self._update_peak_mode()
 
+    def _build_williamson_hall_tab(self, parent):
+        inputs = self._named_section(parent, "wh.inputs", "Williamson-Hall Inputs", 0)
+        self._entry(inputs, 0, "Data directory", "wh.data_dir", "Folder containing exported I_vs_2th TXT files or scan CSV files.", "directory")
+        self._entry(
+            inputs,
+            1,
+            "Scan range/list",
+            "wh.scans",
+            "Leave blank to use all matching scans, or enter a scan, list, range, stepped range, or :n for every nth discovered scan.",
+            optional=True,
+            placeholder=":5, 440-460:5, or 440,441,445",
+        )
+        self._combo(
+            inputs,
+            2,
+            "Profile source",
+            "wh.profile_source",
+            ["txt", "csv"],
+            "TXT reads exported I_vs_2th frame files. CSV reads a suitable scan CSV with 2theta and intensity columns.",
+            "txt",
+        )
+        self._combo(
+            inputs,
+            3,
+            "Scan type",
+            "wh.scan_type",
+            ["delta", "chi", "z", "omega", ""],
+            "TXT scan family to use. Delta scans are combined across all frames by overlap averaging.",
+            "delta",
+            optional=True,
+        )
+        self._entry(inputs, 4, "Frame index", "wh.frame_index", "Frame file index for non-delta TXT scans or grouped CSV profiles.", default="0", optional=True)
+        self._combo(
+            inputs,
+            5,
+            "X/metadata field",
+            "wh.x",
+            X_METADATA_OPTIONS,
+            "Trend x-axis for the saved WH summary plot.",
+            "scan_number",
+        )
+        self._combo(
+            inputs,
+            6,
+            "Second y-axis",
+            "wh.secondary_y",
+            ["none", "temperature", "energy", "usable_peak_count", "target_count", "registration_initial_shift"],
+            "Optional right-hand y-axis on the microstrain trend panel. You can type any numeric summary column.",
+            "none",
+            optional=True,
+            readonly=False,
+        )
+        self._checkbox(inputs, 7, "Show final plot", "wh.show_final", "Display the final Williamson-Hall trend plot interactively.", optional=True)
+
+        targets = self._named_section(parent, "wh.targets", "Peak Targets", 1)
+        target_source = self._radio_group(
+            targets,
+            0,
+            "Target source",
+            "wh.target_source",
+            [
+                ("lattice", "Lattice", "Generate expected peak positions from lattice parameters and energy/wavelength."),
+                ("manual", "2theta list", "Use manually supplied 2theta positions, optionally with labels."),
+            ],
+            default="lattice",
+        )
+        self._entry(
+            targets,
+            1,
+            "2theta positions",
+            "wh.manual_two_theta",
+            "Comma-separated positions, optionally with labels, e.g. 31.8 (111), 38.5 shoulder.",
+            optional=True,
+        )
+        self._combo(
+            targets,
+            2,
+            "Lattice type",
+            "wh.lattice_type",
+            ["cubic", "fcc", "bcc", "tetragonal", "hcp", "orthorhombic"],
+            "Crystal/lattice family for calculated target positions.",
+            "cubic",
+        )
+        self._entry(targets, 3, "a (Angstrom)", "wh.a", "Lattice parameter a in Angstrom.")
+        self._entry(targets, 4, "b (Angstrom)", "wh.b", "Lattice parameter b in Angstrom where required.", optional=True)
+        self._entry(targets, 5, "c (Angstrom)", "wh.c", "Lattice parameter c in Angstrom where required.", optional=True)
+        self._entry(targets, 6, "Phase label", "wh.phase_name", "Optional label added to hkl peak labels.", optional=True)
+        self._entry(targets, 7, "Max hkl index", "wh.max_index", "Maximum h, k, l index used for lattice-generated targets.", default="8")
+        self._entry(
+            targets,
+            8,
+            "Thermal alpha (1/K)",
+            "wh.thermal_alpha",
+            "Optional isotropic linear thermal expansion coefficient for WH target positions only.",
+            optional=True,
+        )
+        self._entry(
+            targets,
+            9,
+            "Reference temperature",
+            "wh.reference_temperature",
+            "Temperature corresponding to the entered lattice parameters. Use the same scale as scan metadata; only T - T0 is used.",
+            default="25",
+            optional=True,
+        )
+
+        settings = self._named_section(parent, "wh.settings", "Broadening and Fit Settings", 2)
+        self._entry(settings, 0, "Wavelength (Angstrom)", "wh.wavelength", "X-ray wavelength. If blank, quixrd tries energy metadata.", optional=True)
+        self._entry(settings, 1, "Energy (keV)", "wh.energy", "Beam energy in keV or eV. Linked to wavelength while typing.", optional=True)
+        self._entry(settings, 2, "Fit window", "wh.fit_window", "Half-width in 2theta degrees around each assigned peak.", default="0.35")
+        self._entry(settings, 3, "Shape factor K", "wh.shape_factor", "Shape factor used for D = K lambda / intercept.", default="0.9")
+        self._entry(
+            settings,
+            4,
+            "2theta calibration JSON",
+            "wh.twotheta_calibration_json",
+            "Optional 2theta calibration JSON. If blank, the selected default calibration is used when enabled.",
+            "json",
+            optional=True,
+        )
+        self._entry(
+            settings,
+            5,
+            "Uncalibrated registration window",
+            "wh.registration_window",
+            "Maximum broad fingerprint offset allowed for uncorrected profiles.",
+            default="2.0",
+        )
+        self._entry(
+            settings,
+            6,
+            "Calibrated residual shift",
+            "wh.residual_shift_limit",
+            "Maximum residual registration shift when the profile is already 2theta-corrected.",
+            default="0.15",
+        )
+
+        buttons = ttk.Frame(parent)
+        buttons.grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        button = ttk.Button(buttons, text="Run Williamson-Hall Analysis", command=self.run_williamson_hall)
+        button.grid(row=0, column=0, padx=(0, 8))
+        ToolTip(button, "Fit multiple peaks and generate Williamson-Hall diagnostic outputs.")
+
+        self._link_energy_wavelength_fields("wh.wavelength", "wh.energy")
+        target_source.trace_add("write", lambda *_: self._update_wh_mode())
+        self.variables["wh.profile_source"].trace_add("write", lambda *_: self._update_wh_mode())
+        self.variables["wh.scan_type"].trace_add("write", lambda *_: self._update_wh_mode())
+        self.variables["wh.lattice_type"].trace_add("write", lambda *_: self._update_wh_mode())
+        self._update_wh_mode()
+
     def _build_sin2psi_tab(self, parent):
         inputs = self._named_section(parent, "sin2psi.inputs", "Inputs", 0)
         self._entry(inputs, 0, "Data directory", "sin2psi.data_dir", "Folder containing I_vs_2th files and/or sin2psi_export.", "directory")
@@ -2733,7 +3076,7 @@ class XRDGuiApp(ttk.Frame):
         self._entry(exclusions, 1, "Exclude chi ranges", "sin2psi.exclude_chi", "Ranges such as 0-5,85-90.", optional=True)
         self._entry(exclusions, 2, f"Exclude {SIN2PSI_LABEL} ranges", "sin2psi.exclude_sin2psi", "Ranges such as 0.95-1.0.", optional=True)
         self._checkbox(exclusions, 3, "Auto exclude", "sin2psi.auto_exclude", "Trial residual-based outlier exclusion.", optional=True)
-        self._entry(exclusions, 4, "Correction JSON(s)", "sin2psi.correction_json", f"{SIN2PSI_LABEL} correction JSON file, or multiple files separated by semicolons.", "file", optional=True)
+        self._entry(exclusions, 4, "Correction JSON(s)", "sin2psi.correction_json", f"{SIN2PSI_LABEL} correction JSON file, or multiple files separated by semicolons.", "json_multi", optional=True)
 
         stress = self._named_section(parent, "sin2psi.stress", "Stress Calculation", 3)
         self._entry(stress, 0, "E", "sin2psi.elastic_E", "Young's modulus. Stress is reported in the same units as E.", optional=True)
@@ -2933,7 +3276,7 @@ class XRDGuiApp(ttk.Frame):
                 "For TXT input, Browse opens a multi-file picker and stores paths separated by semicolons.\n"
                 "Output folder is where the calibration JSON, combined profile, and plots are written. If blank, quixrd creates a "
                 "calibration subfolder beside the selected input.\n"
-                "LaB6 autofills a cubic lattice with a = 4.25695 Angstrom. Custom lets you choose lattice type and lattice parameters.\n"
+                "LaB6 autofills a cubic lattice with a = 4.156826 Angstrom. Custom lets you choose lattice type and lattice parameters.\n"
                 "Energy and wavelength are linked; if both are blank, quixrd tries to read energy from the input metadata.\n"
                 "Polynomial degree controls the fitted offset-vs-2theta curve. Degree 0 is allowed for a constant offset.\n"
                 "Outlier mode controls peak exclusions for the offset polynomial and Caglioti broadening fits. Review proposes "
@@ -3057,6 +3400,42 @@ class XRDGuiApp(ttk.Frame):
                 "scan, a median-comparison scan when delta BIC is available, and the worst-RMSE scan. Enable Save every diagnostic plot "
                 "to save one image for every successful scan so you can flick through them. These images show "
                 "only the final one-peak and/or two-peak model fits, not intermediate optimiser attempts.\n",
+            ),
+            (
+                "Williamson-Hall",
+                "Williamson-Hall\n"
+                "================\n\n"
+                "Use this tab for quick line-broadening diagnostics across one scan or a scan series. It fits multiple expected "
+                "peaks, corrects instrumental broadening when a 2theta calibration with Caglioti parameters is supplied, and "
+                "plots microstrain and crystallite-size trends. This is intended as a screening tool, not a replacement for "
+                "specialist whole-pattern or line-profile refinement software.\n\n"
+                "Data directory: Folder containing exported TXT frame files or scan CSV files.\n"
+                "Scan range/list: Leave blank to fit all matching scans, or use the normal scan syntax, including :5 for every fifth discovered scan.\n"
+                "Profile source: TXT is the usual exported I_vs_2th frame format. CSV reads a suitable scan CSV containing 2theta and intensity columns.\n"
+                "Scan type: For TXT input, delta scans are combined across all frames by interpolating to a common 2theta grid and averaging overlaps. "
+                "Non-delta scans use the selected frame index.\n"
+                "Target source: Lattice calculates expected hkl positions from lattice parameters and energy/wavelength. 2theta list uses "
+                "manual peak positions, optionally with labels, for unusual structures or peaks that are not covered by the simple lattice calculator.\n"
+                "Thermal expansion: Optional WH-only isotropic thermal expansion can shift lattice-generated target positions using "
+                "a_T = a0 * (1 + alpha * (T - T0)). Enter alpha in 1/K and the reference temperature for the lattice parameters; "
+                "use the same temperature scale as the scan metadata because only T - T0 is used. quixrd uses each scan's "
+                "temperature metadata when available. This is not used for 2theta calibration, where the "
+                "reference lattice value should remain fixed.\n"
+                "Wavelength/Energy: Required for lattice target generation and for converting Williamson-Hall intercept into crystallite size. "
+                "If blank, quixrd tries the profile metadata.\n"
+                "2theta calibration JSON: Optional instrumental calibration. If the field is blank, the GUI uses the selected default calibration "
+                "when Apply 2theta Calibration by Default is enabled. Profiles already marked with a TwoTheta Correction metadata line are treated "
+                "as corrected.\n"
+                "Caglioti broadening correction: If the selected 2theta calibration JSON contains Caglioti U/V/W parameters, Williamson-Hall "
+                "subtracts instrumental FWHM broadening in quadrature before fitting: beta_sample = sqrt(beta_observed^2 - beta_instrument^2), "
+                "with beta values in radians. If no calibration JSON is supplied, or the JSON has no Caglioti fit, no instrumental broadening "
+                "subtraction is applied.\n"
+                "Registration: Uncorrected data may use a broad fingerprint offset search to align expected peaks with observed peaks. Corrected "
+                "data skip broad fingerprinting and allow only the small calibrated residual shift, so the calibration is not effectively undone.\n\n"
+                "Williamson-Hall calculation:\n"
+                "The first implementation uses total fitted FWHM. It plots beta cos(theta) against 4 sin(theta), with beta in radians. "
+                "The fitted slope is reported as microstrain. A positive intercept gives crystallite size through D = K lambda / intercept, "
+                "where K is the editable shape factor. If the intercept is not positive, the crystallite size is reported as nonphysical.\n",
             ),
             (
                 f"{SIN2PSI_LABEL}",

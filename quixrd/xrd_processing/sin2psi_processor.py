@@ -427,12 +427,33 @@ def discover_scan_files(data_dir, scan_number):
     return [p for _, p in sorted(matched, key=lambda item: (item[0], item[1]))]
 
 
+def _is_sin2psi_raw_file(path):
+    parts = _scan_name_parts(Path(path).name)
+    if _extract_scan_number(parts) is None:
+        return False
+    if len(parts) == 2:
+        try:
+            meta = parse_txt_scan(str(path))
+        except Exception as exc:
+            logger.warning("Skipping %s: %s", Path(path).name, exc)
+            return False
+        return (meta.get("scan_type") or "").strip().lower() in {
+            "ascan_chi",
+            "dscan_chi",
+        }
+    if len(parts) >= 3:
+        return parts[1].strip().lower() == "chi"
+    return False
+
+
 def discover_scan_numbers(data_dir, include_raw=True, include_processed=True):
     """Return available scan numbers from exported TXT files and/or processed scan folders."""
     data_path = Path(data_dir)
     scan_numbers = set()
     if include_raw:
         for path in sorted(data_path.glob("I_vs_2th_*.txt")):
+            if not _is_sin2psi_raw_file(path):
+                continue
             scan_number = _extract_scan_number(_scan_name_parts(path.name))
             if scan_number is not None:
                 scan_numbers.add(scan_number)
@@ -924,8 +945,16 @@ def _theta_scale(sample_two_theta, reference_two_theta):
 
 
 def load_sin2psi_correction(correction_json):
-    with open(correction_json, "r", encoding="utf-8") as fh:
-        correction = json.load(fh)
+    try:
+        with open(correction_json, "r", encoding="utf-8") as fh:
+            correction = json.load(fh)
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"Could not read sin2psi correction JSON as text: {correction_json}. "
+            "Check that this path points to a JSON file, not a PNG/SVG/image output."
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid sin2psi correction JSON: {correction_json}") from exc
     if not isinstance(correction, dict):
         raise ValueError(f"Sin2psi correction must be a JSON object: {correction_json}")
     method = correction.get("method", "polynomial")
@@ -1702,8 +1731,16 @@ def build_processing_params(**params):
 
 
 def load_processing_params(params_json):
-    with open(params_json, "r", encoding="utf-8") as fh:
-        params = json.load(fh)
+    try:
+        with open(params_json, "r", encoding="utf-8") as fh:
+            params = json.load(fh)
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"Could not read processing parameters as text: {params_json}. "
+            "Check that this path points to a JSON parameter log, not a plot/image file."
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid processing parameter JSON: {params_json}") from exc
     if not isinstance(params, dict):
         raise ValueError(f"Processing params must be a JSON object: {params_json}")
     return params

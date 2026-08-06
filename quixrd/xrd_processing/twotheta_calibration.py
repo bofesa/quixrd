@@ -25,7 +25,7 @@ from scipy.signal import find_peaks
 from .peak_overlay import ENERGY_TO_WAVELENGTH_KEV_A, PredictedPeak, lattice_predicted_peaks, overlay_predicted_peaks
 
 
-LAB6_A = 4.25695
+LAB6_A = 4.156826
 CORRECTION_METADATA_KEY = "TwoTheta Correction"
 
 
@@ -982,8 +982,16 @@ def apply_calibration_to_profile(two_theta, intensity, calibration, allow_recorr
 
 
 def load_calibration(path):
-    with open(path, "r", encoding="utf-8") as fh:
-        calibration = json.load(fh)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            calibration = json.load(fh)
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"Could not read 2theta calibration JSON as text: {path}. "
+            "Check that this path points to the calibration .json file, not a PNG/SVG/image output."
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid 2theta calibration JSON: {path}") from exc
     if not isinstance(calibration, dict) or calibration.get("type") != "twotheta_axis_calibration":
         raise ValueError(f"Not a quixrd 2theta calibration JSON: {path}")
     calibration.setdefault("path", str(path))

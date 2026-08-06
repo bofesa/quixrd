@@ -154,7 +154,7 @@ In the GUI, use `Calibration > 2theta Calibration...`. It accepts:
 - one or more exported TXT delta-frame files;
 - one all-frame CSV export.
 
-For LaB6, the GUI autofills cubic `a = 4.25695 Å`. The output folder receives:
+For LaB6, the GUI autofills cubic `a = 4.156826 Å`. The output folder receives:
 
 - a combined `I_vs_2th` TXT profile with metadata;
 - a combined CSV profile;
@@ -305,3 +305,60 @@ To replot an existing run on a different metadata x-axis without refitting, use 
 ```python
 spinodal.plot_peak_series_from_csv(r"C:\path\to\peak_series_20260724_120000.csv", x="temperature")
 ```
+
+## Williamson-Hall Diagnostics
+
+The GUI `Williamson-Hall` tab performs a quick FWHM-based Williamson-Hall check across one scan or a scan series. This is intended for screening broadening trends, not as a replacement for specialist line-profile or whole-pattern refinement.
+
+It can fit target peaks from either simple lattice parameters or a manual 2theta list. Manual positions are useful for unusual structures, mixed phases, or quick checks where the built-in lattice calculator is too limited.
+
+Programmatically:
+
+```python
+from quixrd.xrd_processing import williamson_hall as wh
+
+result = wh.run_williamson_hall_series(
+    r"C:\path\to\export",
+    scans=[440, 441, 442],
+    scan_type="delta",
+    target_source="lattice",
+    lattice_type="cubic",
+    a=4.05,
+    wavelength=1.0,
+    thermal_alpha=23e-6,
+    reference_temperature=25.0,
+    twotheta_calibration_json=r"C:\path\to\twotheta_calibration.json",
+)
+
+manual = wh.run_williamson_hall_series(
+    r"C:\path\to\export",
+    scans=[440],
+    scan_type="chi",
+    frame_index=0,
+    target_source="manual",
+    manual_two_theta="31.8 (111), 38.5 (200), 44.7 (220)",
+    wavelength=1.0,
+)
+```
+
+For `delta` scans, all matching `I_vs_2th_<scan>_delta_<frame>.txt` frames are homogenised by interpolating to a common 2theta grid and averaging overlapping regions. If a 2theta calibration JSON with Caglioti parameters is supplied, instrumental broadening is subtracted in quadrature before the Williamson-Hall fit.
+
+For lattice-generated WH targets, optional isotropic thermal expansion can shift the predicted hkl positions scan-by-scan using temperature metadata:
+
+`a_T = a0 * (1 + alpha * (T - T0))`
+
+Use `thermal_alpha` in `1/K` and `reference_temperature` in the same temperature scale as the exported metadata. This convenience correction is only used for WH target prediction; it is not used for 2theta calibration, where the reference lattice parameter should remain fixed.
+
+Outputs are written under a timestamped folder:
+
+`<data-dir>\williamson_hall\williamson_hall_<timestamp>\`
+
+Files include:
+
+- `williamson_hall_peaks_<timestamp>.csv`
+- `williamson_hall_summary_<timestamp>.csv`
+- `williamson_hall_params_<timestamp>.json`
+- per-scan Williamson-Hall PNG/SVG plots
+- a representative fitted-profile diagnostic PNG/SVG
+
+The plot uses `beta cos(theta)` versus `4 sin(theta)`, with beta in radians. The slope is reported as microstrain. A positive intercept gives crystallite size from `D = K lambda / intercept`, where `K` defaults to `0.9`.

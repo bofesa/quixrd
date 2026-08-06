@@ -19,6 +19,7 @@ from quixrd.xrd_processing import peak_overlay
 from quixrd.xrd_processing import sin2psi_processor as proc
 from quixrd.xrd_processing import spinodal_peak_analysis as spinodal
 from quixrd.xrd_processing import twotheta_calibration as tth_cal
+from quixrd.xrd_processing import williamson_hall as wh
 
 
 class ProcessorSmokeTest(unittest.TestCase):
@@ -89,6 +90,17 @@ class ProcessorSmokeTest(unittest.TestCase):
                 "I_vs_2th_900_chi_2.txt",
             ],
         )
+
+    def test_discover_scan_numbers_ignores_delta_only_raw_scans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self._write_scan_txt(tmp_path / "I_vs_2th_209_delta_0.txt", scan_type="ascan_delta", chi=0.0)
+            self._write_scan_txt(tmp_path / "I_vs_2th_210_chi_0.txt", scan_type="ascan_chi", chi=0.0)
+            self._write_scan_txt(tmp_path / "I_vs_2th_211_0.txt", scan_type="dscan_chi", chi=5.0)
+
+            found = proc.discover_scan_numbers(tmp_path, include_raw=True, include_processed=False)
+
+        self.assertEqual(found, [210, 211])
 
     def test_seeded_fit_frame_reports_window_mode(self):
         sample = self.repo_root / "export" / "I_vs_2th_440_chi_0.txt"
@@ -177,6 +189,7 @@ class ProcessorSmokeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             wavelength = 1.0
+            self.assertAlmostEqual(tth_cal.LAB6_A, 4.156826)
             peaks = peak_overlay.lattice_predicted_peaks(
                 "cubic",
                 tth_cal.LAB6_A,
@@ -238,6 +251,18 @@ class ProcessorSmokeTest(unittest.TestCase):
             self.assertTrue(corrected["applied"])
             corrected_again = tth_cal.apply_calibration_to_txt_file(frame_paths[0], result["path"])
             self.assertFalse(corrected_again["applied"])
+
+    def test_json_loaders_report_binary_file_paths_clearly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "wrong.png"
+            path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+            with self.assertRaisesRegex(ValueError, "not a PNG/SVG/image"):
+                tth_cal.load_calibration(path)
+            with self.assertRaisesRegex(ValueError, "not a PNG/SVG/image"):
+                proc.load_sin2psi_correction(path)
+            with self.assertRaisesRegex(ValueError, "not a plot/image file"):
+                proc.load_processing_params(path)
 
     def test_twotheta_calibration_shows_generated_figures_together(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -672,6 +697,175 @@ class ProcessorSmokeTest(unittest.TestCase):
         self.assertEqual(fit["data_point_count"], 4000)
         self.assertLessEqual(fit["fit_point_count"], spinodal.MAX_FIT_POINTS)
         self.assertAlmostEqual(fit["single"]["center_1"], 40.0, delta=0.02)
+
+    def test_williamson_hall_manual_targets_and_math_with_caglioti(self):
+        targets = wh.parse_manual_targets("25.0 (111), 40.0 shoulder")
+        self.assertEqual(len(targets), 2)
+        self.assertEqual(targets[0].label, "111")
+
+        wavelength = 1.0
+        strain = 0.0015
+        intercept = 0.002
+        inst_fwhm_deg = 0.03
+        peaks = []
+        for center in [25.0, 40.0, 60.0, 80.0]:
+            theta = math.radians(center / 2.0)
+            sample_beta = (intercept + strain * 4.0 * math.sin(theta)) / math.cos(theta)
+            sample_fwhm_deg = math.degrees(sample_beta)
+            observed_fwhm = math.sqrt(sample_fwhm_deg**2 + inst_fwhm_deg**2)
+            peaks.append(
+                {
+                    "usable": True,
+                    "center": center,
+                    "fwhm": observed_fwhm,
+                    "fwhm_err": 0.001,
+                    "amplitude": 100.0,
+                }
+            )
+
+        _rows, summary = wh.calculate_wh_fit(
+            peaks,
+            wavelength=wavelength,
+            shape_factor=0.9,
+            caglioti={"U": 0.0, "V": 0.0, "W": inst_fwhm_deg**2},
+        )
+
+        self.assertTrue(summary["wh_success"])
+        self.assertAlmostEqual(summary["microstrain"], strain, delta=2e-4)
+        self.assertAlmostEqual(summary["intercept"], intercept, delta=3e-4)
+        self.assertAlmostEqual(summary["crystallite_size_A"], 0.9 * wavelength / intercept, delta=20.0)
+
+    def test_williamson_hall_two_point_fit_has_no_covariance_error(self):
+        peaks = [
+            {"usable": True, "center": 30.0, "fwhm": 0.12, "fwhm_err": 0.001, "amplitude": 100.0},
+            {"usable": True, "center": 60.0, "fwhm": 0.16, "fwhm_err": 0.001, "amplitude": 100.0},
+        ]
+
+        _rows, summary = wh.calculate_wh_fit(peaks, wavelength=1.0)
+
+        self.assertTrue(summary["wh_success"])
+        self.assertIn("Only two usable peaks", summary["warning"])
+        self.assertTrue(np.isnan(summary["microstrain_err"]))
+        self.assertTrue(np.isnan(summary["intercept_err"]))
+
+    def test_williamson_hall_thermal_expansion_adjusts_lattice_targets(self):
+        adjusted = wh.thermal_adjust_lattice(
+            a=4.0,
+            alpha=1e-5,
+            reference_temperature=300.0,
+            temperature=500.0,
+        )
+        self.assertTrue(adjusted["applied"])
+        self.assertAlmostEqual(adjusted["a"], 4.0 * 1.002)
+
+        cold_targets = wh.build_wh_targets(
+            target_source="lattice",
+            lattice_type="cubic",
+            a=4.0,
+            wavelength=1.0,
+            max_index=2,
+        )
+        hot_targets = wh.build_wh_targets(
+            target_source="lattice",
+            lattice_type="cubic",
+            a=4.0,
+            wavelength=1.0,
+            max_index=2,
+            thermal_alpha=1e-5,
+            reference_temperature=300.0,
+            temperature=500.0,
+        )
+        self.assertLess(hot_targets[0].two_theta, cold_targets[0].two_theta)
+
+    def test_williamson_hall_lattice_delta_run_and_calibrated_registration_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wavelength = 1.0
+            targets = wh.build_wh_targets(
+                target_source="lattice",
+                lattice_type="cubic",
+                a=4.0,
+                wavelength=wavelength,
+                max_index=3,
+                min_two_theta=15,
+                max_two_theta=70,
+            )[:4]
+            self.assertGreaterEqual(len(targets), 3)
+
+            def profile(x):
+                y = np.full_like(x, 20.0, dtype=float)
+                for peak in targets:
+                    y += 900.0 * np.exp(-np.log(2.0) * ((x - (peak.two_theta + 0.08)) / 0.08) ** 2)
+                return y
+
+            for scan in (80, 81):
+                for idx, (low, high) in enumerate([(15.0, 45.0), (38.0, 72.0)]):
+                    x = np.arange(low, high, 0.01)
+                    y = profile(x)
+                    path = root / f"I_vs_2th_{scan}_delta_{idx}.txt"
+                    path.write_text(
+                        "\n".join(
+                            [
+                                "# Scan Type: ascan_delta",
+                            "# Energy: 12.3984193",
+                            f"# Temperature: {300 + scan}",
+                            "# TwoTheta Correction: already_corrected.json",
+                            "# 2theta intensity",
+                        ]
+                            + [f"{xx:.5f} {yy:.8f}" for xx, yy in zip(x, y)]
+                        ),
+                        encoding="utf-8",
+                    )
+
+            result = wh.run_williamson_hall_series(
+                root,
+                scans=[80, 81],
+                scan_type="delta",
+                target_source="lattice",
+                lattice_type="cubic",
+                a=4.0,
+                wavelength=wavelength,
+                max_index=3,
+                thermal_alpha=1e-6,
+                reference_temperature=300.0,
+                fit_window=0.25,
+                residual_shift_limit=0.15,
+                save=True,
+            )
+
+            self.assertTrue(Path(result["summary_path"]).exists())
+            self.assertTrue(Path(result["peaks_path"]).exists())
+            self.assertTrue(Path(result["params_path"]).exists())
+            self.assertTrue(result["wh_plot_paths"])
+            output_dir = Path(result["output_dir"])
+            self.assertTrue((output_dir / "scan_80_profile_diagnostic.png").exists())
+            self.assertTrue((output_dir / "scan_81_profile_diagnostic.png").exists())
+            summary = pd.read_csv(result["summary_path"])
+            self.assertTrue(bool(summary.loc[0, "calibrated_input"]))
+            self.assertTrue(bool(summary.loc[0, "thermal_lattice_applied"]))
+            self.assertAlmostEqual(summary.loc[0, "adjusted_a"], 4.0 * (1.0 + 1e-6 * 80.0))
+            self.assertLessEqual(abs(float(summary.loc[0, "registration_initial_shift"])), 0.15)
+            self.assertGreaterEqual(int(summary.loc[0, "usable_peak_count"]), 2)
+
+            with mock.patch.object(wh, "calculate_wh_fit", side_effect=RuntimeError("covariance failed")):
+                failed_result = wh.run_williamson_hall_series(
+                    root,
+                    scans=[80],
+                    scan_type="delta",
+                    target_source="lattice",
+                    lattice_type="cubic",
+                    a=4.0,
+                    wavelength=wavelength,
+                    max_index=3,
+                    fit_window=0.25,
+                    residual_shift_limit=0.15,
+                    save=True,
+                )
+            failed_output = Path(failed_result["output_dir"])
+            self.assertTrue((failed_output / "scan_80_profile_diagnostic.png").exists())
+            failed_summary = pd.read_csv(failed_result["summary_path"])
+            self.assertFalse(bool(failed_summary.loc[0, "wh_success"]))
+            self.assertIn("WH line fit failed", failed_summary.loc[0, "warning"])
 
     def test_stress_with_reference_d0_and_equibiaxial_fallback(self):
         sin2psi = np.array([0.0, 0.25, 0.5, 0.75])
@@ -1372,6 +1566,9 @@ class ProcessorSmokeTest(unittest.TestCase):
                 "peak.inputs",
                 "peak.replot",
                 "peak.fit_options",
+                "wh.inputs",
+                "wh.targets",
+                "wh.settings",
                 "sin2psi.inputs",
                 "sin2psi.peak_options",
                 "sin2psi.exclusions",
@@ -1391,6 +1588,7 @@ class ProcessorSmokeTest(unittest.TestCase):
                     "Plotting",
                     "Sorting",
                     "Peak Analysis",
+                    "Williamson-Hall",
                     gui_app.SIN2PSI_LABEL,
                 ],
             )
@@ -1501,6 +1699,20 @@ class ProcessorSmokeTest(unittest.TestCase):
                 self.assertEqual(app.twotheta_calibration_file.get(), "calibration.json")
                 self.assertTrue(app.apply_twotheta_calibration_var.get())
 
+            with mock.patch.object(gui_app.filedialog, "askopenfilenames", return_value=("a.json", "b.json")):
+                app._browse(app.variables["sin2psi.correction_json"], "json_multi", "sin2psi.correction_json")
+            self.assertEqual(app.variables["sin2psi.correction_json"].get(), "a.json; b.json")
+            with mock.patch.object(gui_app.filedialog, "askopenfilename", return_value="twotheta.json"):
+                app._browse(app.variables["wh.twotheta_calibration_json"], "json", "wh.twotheta_calibration_json")
+            self.assertEqual(app.variables["wh.twotheta_calibration_json"].get(), "twotheta.json")
+            with self.assertRaisesRegex(ValueError, "must be a .json file"):
+                app._validate_json_paths("wrong.png", "Calibration JSON")
+            app.twotheta_calibration_file.set(str(Path(tmp) / "wrong.png"))
+            app.apply_twotheta_calibration_var.set(True)
+            (Path(tmp) / "wrong.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            with self.assertRaisesRegex(ValueError, "must be a .json file"):
+                app._twotheta_calibration_for_processing()
+
             with mock.patch.object(gui_app.peak_analysis, "run_peak_series", return_value={"csv_path": "peaks.csv", "plot_path": "peaks.png"}) as peak_run, \
                     mock.patch.object(app, "_show_peak_trend_from_csv") as show_peak_trend:
                 captured = {}
@@ -1575,9 +1787,56 @@ class ProcessorSmokeTest(unittest.TestCase):
                 self.assertEqual(peak_replot.call_args.kwargs["plot_mode"], "two")
                 self.assertEqual(peak_replot.call_args.kwargs["secondary_y"], "minor_major_height_ratio")
 
+            with mock.patch.object(gui_app.wh, "run_williamson_hall_series", return_value={"summary_path": "wh.csv", "plot_path": "wh.png", "peaks_path": "peaks.csv"}) as wh_run, \
+                    mock.patch.object(app, "_show_wh_trend_from_csv") as show_wh_trend:
+                captured = {}
+
+                def immediate_run(title, func, on_success=None, run_on_main=False):
+                    captured["run_on_main"] = run_on_main
+                    captured["result"] = func()
+                    if on_success:
+                        on_success(captured["result"])
+
+                app._run_task = immediate_run
+                app.variables["wh.data_dir"].set(str(Path(tmp)))
+                app.variables["wh.scans"].set("80-81")
+                app.variables["wh.profile_source"].set("txt")
+                app.variables["wh.scan_type"].set("delta")
+                app.variables["wh.target_source"].set("manual")
+                app.variables["wh.manual_two_theta"].set("25.0 (111), 40.0 (200)")
+                app.variables["wh.wavelength"].set("1.0")
+                self.assertEqual(app.variables["wh.reference_temperature"].get(), "25")
+                app.variables["wh.thermal_alpha"].set("1e-5")
+                app.variables["wh.reference_temperature"].set("300")
+                app.variables["wh.fit_window"].set("0.25")
+                app.variables["wh.show_final"].set(True)
+                app._update_wh_mode()
+                self.assertFalse(app.widgets["wh.frame_index"][1].grid_info())
+                self.assertTrue(app.widgets["wh.manual_two_theta"][1].grid_info())
+                self.assertFalse(app.widgets["wh.a"][1].grid_info())
+                app.run_williamson_hall()
+                self.assertEqual(wh_run.call_args.kwargs["scans"], [80, 81])
+                self.assertEqual(wh_run.call_args.kwargs["target_source"], "manual")
+                self.assertEqual(wh_run.call_args.kwargs["manual_two_theta"], "25.0 (111), 40.0 (200)")
+                self.assertEqual(wh_run.call_args.kwargs["thermal_alpha"], 1e-5)
+                self.assertEqual(wh_run.call_args.kwargs["reference_temperature"], 300.0)
+                self.assertIsNone(wh_run.call_args.kwargs["frame_index"])
+                self.assertTrue(captured["run_on_main"])
+                show_wh_trend.assert_called_once_with("wh.csv")
+
+                app.variables["wh.target_source"].set("lattice")
+                app.variables["wh.lattice_type"].set("fcc")
+                app._update_wh_mode()
+                self.assertTrue(app.widgets["wh.a"][1].grid_info())
+                self.assertFalse(app.widgets["wh.manual_two_theta"][1].grid_info())
+                self.assertTrue(app.widgets["wh.thermal_alpha"][1].grid_info())
+                self.assertEqual(app.widgets["wh.b"][1].cget("state"), "disabled")
+                self.assertEqual(app.widgets["wh.c"][1].cget("state"), "disabled")
+
             help_text = app._help_text()
             self.assertIn("Delta scans are homogenised automatically", help_text)
             self.assertIn("comparison panel appears only", help_text)
+            self.assertIn("Williamson-Hall", help_text)
 
             app.variables["sin2psi.action"].set("process")
             app._update_sin2psi_mode()
@@ -1621,6 +1880,7 @@ class ProcessorSmokeTest(unittest.TestCase):
                 captured = {}
 
                 def immediate_run(title, func, on_success=None, run_on_main=False):
+                    captured["run_on_main"] = run_on_main
                     captured["result"] = func()
                     if on_success:
                         on_success(captured["result"])
@@ -1635,6 +1895,7 @@ class ProcessorSmokeTest(unittest.TestCase):
                 app.variables["sin2psi.reference_scan"].set("101")
                 app.run_sin2psi_action()
                 self.assertEqual(generated.call_args.kwargs["degree"], 3)
+                self.assertTrue(captured["run_on_main"])
 
             app.variables["plot.type"].set("stress")
             app._update_plot_mode()
